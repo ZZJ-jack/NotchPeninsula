@@ -1,5 +1,4 @@
-﻿using System;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SkiaSharp;
 using Microsoft.Win32;
@@ -28,6 +27,12 @@ namespace NotchPeninsula
         private float _currentHeight = Renderer.BASE_HEIGHT;
         private float _startHeight = Renderer.BASE_HEIGHT;
         private float _targetHeight = Renderer.BASE_HEIGHT;
+        // 形态弹簧动画状态
+        private float _currentStyleProgress = Renderer.NotchStyle;
+        private float _startStyleProgress = Renderer.NotchStyle;
+        private float _targetStyleProgress = Renderer.NotchStyle;
+        private bool _isStyleAnimating = false;
+        private DateTime _styleAnimStartTime;
 
         // Toast 状态控制
         private ToastData? _currentToast = null;
@@ -56,6 +61,9 @@ namespace NotchPeninsula
         private bool _isYAnimating = false;
         private DateTime _yAnimStartTime;
         private bool _isManuallyExpanded = false; // 用户是否点击了尾巴展开
+        // 用于跟踪内容状态，实现 0.3s 叠化过渡
+        private int _lastDisplayState = -1;
+        private DateTime _stateChangeTime;
         // DPI 缩放相关
         private float _dpiScale = 1f;
         private int _scaledWidth;
@@ -68,6 +76,7 @@ namespace NotchPeninsula
         private SKSurface? _renderSurface;
         // 极速无锁防重入标记
         private int _isRendering = 0;
+        private volatile bool _needsBufferResize = false; // 显存重建标记
 
         public NotchWindow()
         {
@@ -164,7 +173,14 @@ namespace NotchPeninsula
             Debug($"初始音量读取完成，当前音量：{_currentVolume:F2}");
             _ = InitializeListenerAsync();
             Timer aud = new Timer(500);
-            aud.Elapsed += (s, e) => { if(_currentVolume != audio.GetSystemVolume()) {_currentVolume = audio.GetSystemVolume();audioVolumeChanged();} };
+            aud.Elapsed += (s, e) => {
+                float vol = audio.GetSystemVolume(); // 只读取一次，减少底层通信开销
+                if (_currentVolume != vol)
+                {
+                    _currentVolume = vol;
+                    audioVolumeChanged();
+                }
+            };
             aud.Start();
         }
         private void audioVolumeChanged() => Debug($"音量改变{_currentVolume:F2}");
@@ -178,7 +194,7 @@ namespace NotchPeninsula
             Info("通知监听已启动");
 
             // Start polling only after listener initialization to reduce CPU usage during startup.
-            _pollingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1000) };
+            _pollingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2000) };
             _pollingTimer.Tick += (_, __) => _ = _listener?.FetchLatestNotificationAsync();
             _pollingTimer.Start();
         }
@@ -300,23 +316,53 @@ namespace NotchPeninsula
 
         private unsafe void RenderLoop()
         {
-            // 极限性能优化：原子级防重入。如果当前有线程正在渲染，直接丢弃堆积的重叠帧，保护底层矩阵指针
             if (System.Threading.Interlocked.Exchange(ref _isRendering, 1) == 1) return;
 
             try
             {
+                // 实时追踪目标尺寸，动态安全重建底层显存画布
+                float currentTargetDpi = (Win32.GetDpiForSystem() / 96f) * Renderer.GLOBAL_DPI;
+                int targetScaledWidth = (int)(Renderer.WINDOW_WIDTH * currentTargetDpi);
+                int targetScaledHeight = (int)(Renderer.MAX_WINDOW_HEIGHT * currentTargetDpi);
+
+                // 不但要判断 DPI 变化，还要检测目标物理宽高是否发生改变
+                if (Math.Abs(_dpiScale - currentTargetDpi) > 0.01f || _scaledWidth != targetScaledWidth || _scaledHeight != targetScaledHeight || _needsBufferResize)
+                {
+                    _dpiScale = currentTargetDpi;
+                    _scaledWidth = targetScaledWidth;
+                    _scaledHeight = targetScaledHeight;
+
+                    _renderSurface?.Dispose();
+                    // 在删除 GDI 对象前，必须先把旧的备用位图选回 DC 中解锁，否则内存永远无法释放
+                    if (_memDc != IntPtr.Zero && _oldBitmap != IntPtr.Zero)
+                    {
+                        Win32.SelectObject(_memDc, _oldBitmap);
+                    }
+                    Win32.DeleteObject(_hBitmap);
+                    Win32.DeleteDC(_memDc);
+                    InitRenderBuffer(); // 重新向系统申请足够大尺寸的内存
+                    _needsBufferResize = false;
+                }
+
                 // 判断当前 Toast 是否处于激活期
                 bool isToastActive = _currentToast != null && DateTime.Now < _toastEndTime;
                 if (!isToastActive && _currentToast != null) _currentToast = null; // 超时清理
 
+                // 如果灵动岛已展开，且鼠标不在岛上(!_isHovered)，且按下了左键(0x01)
+                if (_isManuallyExpanded && !_isHovered && (Win32.GetAsyncKeyState(0x01) & 0x8000) != 0)
+                {
+                    _isManuallyExpanded = false; // 触发收起
+                }
+
                 // 自动隐藏 (Y轴) 逻辑更新：Toast 弹出时绝对不允许隐藏
                 bool shouldHide = IsAutoHideEnabled && !_media.IsActive && !_isManuallyExpanded && !isToastActive;
-                if (_isHovered) shouldHide = false;
 
                 // Y 轴的位移量基于 MAX_WINDOW_HEIGHT 计算
-                float expectedTargetY = shouldHide ? -((Renderer.BASE_HEIGHT - 4) * _dpiScale) : 0f;
+                // Y 轴的隐藏位移量必须加上灵动岛专属的下沉高度，否则藏不进屏幕
+                float currentTopY = 12f * _currentStyleProgress;
+                float expectedTargetY = shouldHide ? -((Renderer.BASE_HEIGHT + currentTopY - 4) * _dpiScale) : 0f;
 
-            if (Math.Abs(expectedTargetY - _targetY) > 0.1f)
+                if (Math.Abs(expectedTargetY - _targetY) > 0.1f)
             {
                 _startY = _currentY;
                 _targetY = expectedTargetY;
@@ -350,17 +396,56 @@ namespace NotchPeninsula
                 }
             }
 
-            // ========================================================
-            // 二维 (X轴宽度与Y轴高度) 弹簧动画逻辑
-            // ========================================================
-            bool currentActive = _media.IsActive;
+                // ========================================================
+                // 二维 (X轴宽度与Y轴高度) 弹簧动画逻辑
+                // ========================================================
+                bool currentActive = _media.IsActive;
 
-            // 决策尺寸
-            float expectedTargetWidth = isToastActive ? Renderer.MEDIA_WIDTH : (currentActive ? Renderer.MEDIA_WIDTH : Renderer.STANDBY_WIDTH);
-            float expectedTargetHeight = isToastActive ? Renderer.TOAST_HEIGHT : Renderer.BASE_HEIGHT;
+                // 状态叠化透明度计算 (0.3s 平滑过渡)
+                int currentDisplayState = isToastActive ? 2 : (currentActive ? 1 : 0);
+                if (currentDisplayState != _lastDisplayState)
+                {
+                    _lastDisplayState = currentDisplayState;
+                    _stateChangeTime = DateTime.Now;
+                }
+                float transitionAlpha = (float)Math.Clamp((DateTime.Now - _stateChangeTime).TotalSeconds / 0.3, 0, 1);
 
-            // 当预期尺寸和当前目标尺寸不同时，立刻重新锚定弹簧起点，不打断原有动量
-            if (Math.Abs(expectedTargetWidth - _targetWidth) > 0.1f || Math.Abs(expectedTargetHeight - _targetHeight) > 0.1f)
+                // 决策尺寸 (分别引用专属宽度和高度)
+                float expectedTargetWidth = isToastActive ? Renderer.TOAST_WIDTH : (currentActive ? Renderer.MEDIA_WIDTH : Renderer.STANDBY_WIDTH);
+                float expectedTargetHeight = isToastActive ? Renderer.TOAST_HEIGHT : (currentActive ? Renderer.MEDIA_HEIGHT : Renderer.BASE_HEIGHT);
+
+                // 形态(刘海/灵动岛) 弹簧物理插值引擎
+                float expectedStyleTarget = Renderer.NotchStyle;
+                if (Math.Abs(expectedStyleTarget - _targetStyleProgress) > 0.001f)
+                {
+                    _startStyleProgress = _currentStyleProgress;
+                    _targetStyleProgress = expectedStyleTarget;
+                    _styleAnimStartTime = DateTime.Now;
+                    _isStyleAnimating = true;
+                }
+
+                if (_isStyleAnimating)
+                {
+                    double elapsedS = (DateTime.Now - _styleAnimStartTime).TotalSeconds;
+                    double durationS = 0.450; // 稍微放宽 50ms 时长，保证 Q 弹尾迹完整渲染不被硬切
+
+                    if (elapsedS >= durationS)
+                    {
+                        _isStyleAnimating = false;
+                        _currentStyleProgress = _targetStyleProgress;
+                    }
+                    else
+                    {
+                        // 提高振动频率让爆发力更干脆，微微降低阻尼多保留一丝余震，果味更浓
+                        double freq = 2.65;
+                        double decay = 10.8;
+                        double spring = 1.0 - Math.Cos(freq * elapsedS * 2.0 * Math.PI) * Math.Exp(-decay * elapsedS);
+                        _currentStyleProgress = (float)(_startStyleProgress + (_targetStyleProgress - _startStyleProgress) * spring);
+                    }
+                }
+
+                // 当预期尺寸和当前目标尺寸不同时，立刻重新锚定弹簧起点，不打断原有动量
+                if (Math.Abs(expectedTargetWidth - _targetWidth) > 0.1f || Math.Abs(expectedTargetHeight - _targetHeight) > 0.1f)
             {
                 _startWidth = _currentWidth;
                 _targetWidth = expectedTargetWidth;
@@ -375,19 +460,19 @@ namespace NotchPeninsula
             if (_isAnimating)
             {
                 double elapsed = (DateTime.Now - _animStartTime).TotalSeconds;
-                double duration = 0.400; // 动画总时长 400ms
+                    double duration = 0.450; // 保持与上方形态切换同频
 
-                if (elapsed >= duration)
-                {
-                    _isAnimating = false;
-                    _currentWidth = _targetWidth;
-                    _currentHeight = _targetHeight;
-                }
-                else
-                {
-                    double freq = 2.4;
-                    double decay = 12.0;
-                    double spring = 1.0 - Math.Cos(freq * elapsed * 2.0 * Math.PI) * Math.Exp(-decay * elapsed);
+                    if (elapsed >= duration)
+                    {
+                        _isAnimating = false;
+                        _currentWidth = _targetWidth;
+                        _currentHeight = _targetHeight;
+                    }
+                    else
+                    {
+                        double freq = 2.65;  // 匹配形态切换的弹簧张力
+                        double decay = 10.8; // 匹配形态切换的阻尼衰减
+                        double spring = 1.0 - Math.Cos(freq * elapsed * 2.0 * Math.PI) * Math.Exp(-decay * elapsed);
 
                     // X 和 Y 同步套用一个物理弹性引擎，保证视效极度统一协调
                     _currentWidth = (float)(_startWidth + (_targetWidth - _startWidth) * spring);
@@ -430,7 +515,7 @@ namespace NotchPeninsula
                 canvas.Scale(_dpiScale);
 
                 // 传入 currentHeight 和 _currentToast
-                Renderer.Draw(canvas, _media, _isHovered, _currentWidth, _currentHeight, startupProgress, _currentBars, _currentToast);
+                Renderer.Draw(canvas, _media, _isHovered, _currentWidth, _currentHeight, startupProgress, _currentBars, _currentToast, _currentStyleProgress, transitionAlpha);
 
                 // 恢复原始矩阵状态
                 canvas.Restore();
@@ -451,8 +536,9 @@ namespace NotchPeninsula
             var ptSrc = new Win32.POINT(0, 0);
             var ptDst = new Win32.POINT { x = 0, y = 0 };
 
-            Win32.GetWindowRect(_hwnd, out var rect);
-            ptDst.x = rect.Left;
+            // 获取主屏幕实时宽度，减去当前缩放宽度后除以 2，保证刘海永远严格居中
+            int screenWidth = System.Windows.Forms.Screen.PrimaryScreen?.Bounds.Width ?? 1920;
+            ptDst.x = (screenWidth - _scaledWidth) / 2;
             ptDst.y = (int)_currentY;
 
             var size = new Win32.SIZE(_scaledWidth, _scaledHeight);
@@ -497,7 +583,7 @@ namespace NotchPeninsula
                         _isHovered = true;
                     }
 
-                    if (_isHovered && _media.IsActive && _currentToast == null) // 当 Toast 存在时拦截控制按钮点击区域
+                    if (_isHovered && _media.IsActive && _currentToast == null)
                     {
                         int x = (int)((short)(lParam.ToInt32() & 0xFFFF) / _dpiScale);
                         int y = (int)((short)((lParam.ToInt32() >> 16) & 0xFFFF) / _dpiScale);
@@ -507,9 +593,16 @@ namespace NotchPeninsula
                         int btnPlayX = (int)right - 60;
                         int btnNextX = (int)right - 30;
 
-                        bool overPrev = x >= btnPrevX + 6 && x <= btnPrevX + 24 && y >= 8 && y <= 26;
-                        bool overPlay = x >= btnPlayX + 6 && x <= btnPlayX + 24 && y >= 8 && y <= 26;
-                        bool overNext = x >= btnNextX + 6 && x <= btnNextX + 24 && y >= 8 && y <= 26;
+                        // 媒体控制按钮的悬停交互位移补偿
+                        float hitTopY = 12f * _currentStyleProgress;
+
+                        // 动态计算 Y 轴热区（设定热区高度为 18）
+                        float btnStartY = (_currentHeight - 18f) / 2f + hitTopY;
+                        float btnEndY = btnStartY + 18f;
+
+                        bool overPrev = x >= btnPrevX + 6 && x <= btnPrevX + 24 && y >= btnStartY && y <= btnEndY;
+                        bool overPlay = x >= btnPlayX + 6 && x <= btnPlayX + 24 && y >= btnStartY && y <= btnEndY;
+                        bool overNext = x >= btnNextX + 6 && x <= btnNextX + 24 && y >= btnStartY && y <= btnEndY;
 
                         _isCursorOverIcon = overPrev || overPlay || overNext;
                     }
@@ -523,7 +616,6 @@ namespace NotchPeninsula
                     _isTrackingMouse = false;
                     _isHovered = false;
                     _isCursorOverIcon = false;
-                    _isManuallyExpanded = false;
                     break;
 
                 case Win32.WM_LBUTTONDOWN:
@@ -536,14 +628,26 @@ namespace NotchPeninsula
                     if (_isHovered && _media.IsActive && _isCursorOverIcon && _currentToast == null)
                     {
                         int x = (int)((short)(lParam.ToInt32() & 0xFFFF) / _dpiScale);
-                        float right = (Renderer.WINDOW_WIDTH + _currentWidth) / 2f;
+                        int clickY = (int)((short)((lParam.ToInt32() >> 16) & 0xFFFF) / _dpiScale);
 
-                        if (x >= right - 84 && x <= right - 66)
-                            _media.Previous();
-                        else if (x >= right - 54 && x <= right - 36)
-                            _media.TogglePlayPause();
-                        else if (x >= right - 24 && x <= right - 6)
-                            _media.Next();
+                        float hitTopY = 12f * _currentStyleProgress;
+
+                        // 动态计算点击时的 Y 轴边界
+                        float btnStartY = (_currentHeight - 18f) / 2f + hitTopY;
+                        float btnEndY = btnStartY + 18f;
+
+                        // 使用动态边界判断点击
+                        if (clickY >= btnStartY && clickY <= btnEndY)
+                        {
+                            float right = (Renderer.WINDOW_WIDTH + _currentWidth) / 2f;
+
+                            if (x >= right - 84 && x <= right - 66)
+                                _media.Previous();
+                            else if (x >= right - 54 && x <= right - 36)
+                                _media.TogglePlayPause();
+                            else if (x >= right - 24 && x <= right - 6)
+                                _media.Next();
+                        }
                     }
                     break;
 

@@ -1,6 +1,4 @@
-﻿using System;
-using System.Runtime.InteropServices;
-using System.Threading;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Win32; // 添加注册表命名空间
 
 namespace NotchPeninsula
@@ -24,7 +22,30 @@ namespace NotchPeninsula
                     MediaController.IsMediaControlEnabled = (int)key.GetValue("MediaControl", 1) != 0;
                     MediaController.TargetPlatform = (string)key.GetValue("TargetPlatform", "other") ?? "other";
                     NotchWindow.IsToastEnabled = (int)key.GetValue("ToastEnabled", 1) != 0;
+
+                    // 读取个性化参数
+                    Renderer.STANDBY_WIDTH = Convert.ToSingle(key.GetValue("Custom_StandbyW", 130f));
+                    Renderer.BASE_HEIGHT = Convert.ToSingle(key.GetValue("Custom_BaseH", 34f));
+                    Renderer.MEDIA_WIDTH = Convert.ToSingle(key.GetValue("Custom_MediaW", 260f));
+                    Renderer.MEDIA_HEIGHT = Convert.ToSingle(key.GetValue("Custom_MediaH", 40f));
+                    Renderer.TOAST_WIDTH = Convert.ToSingle(key.GetValue("Custom_ToastW", 260f));
+                    Renderer.TOAST_HEIGHT = Convert.ToSingle(key.GetValue("Custom_ToastH", 55f));
+                    Renderer.GLOBAL_DPI = Convert.ToSingle(key.GetValue("Custom_Dpi", 1.0f));
+                    Renderer.ThemeMode = (int)key.GetValue("ThemeMode", 0);
+                    Renderer.NotchStyle = (int)key.GetValue("NotchStyle", 0);
+                    Renderer.StandbyDisplayMode = (int)key.GetValue("StandbyDisplayMode", 0); // 极速从注册表栈读取
+                    Renderer.ApplyThemeColors(); // 启动时注入颜色
                 }
+
+                // 监听 Windows 系统偏好设置（如深浅色主题）变更事件
+                SystemEvents.UserPreferenceChanged += (s, e) =>
+                {
+                    // 如果当前设置了“跟随系统(2)”，当系统主题改变时立即重新渲染颜色
+                    if (Renderer.ThemeMode == 2)
+                    {
+                        Renderer.ApplyThemeColors();
+                    }
+                };
             }
             catch (Exception ex)
             {
@@ -69,6 +90,9 @@ namespace NotchPeninsula
 
                 // 在实例化任何窗口和媒体控制器之前，先将配置注入内存
                 LoadSettings();
+
+                // 启动时异步静默检测更新，不阻塞主线程
+                UpdateManager.StartSilentCheck();
 
                 var window = new NotchWindow();
                 window.Run();

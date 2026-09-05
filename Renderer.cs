@@ -1,4 +1,3 @@
-using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using SkiaSharp;
@@ -7,14 +6,68 @@ namespace NotchPeninsula
 {
     public static class Renderer
     {
-        // 1. 布局核心参数 
-        public const int WINDOW_WIDTH = 320;
-        public const int BASE_HEIGHT = 34;
-        public const int TOAST_HEIGHT = 55;
-        public const int MAX_WINDOW_HEIGHT = 55;
+        // 1. 布局核心参数 (改为无锁动态变量)
+        private static volatile float _standbyWidth = 130f;
+        private static volatile float _baseHeight = 34f;
+        private static volatile float _mediaWidth = 260f;
+        private static volatile float _mediaHeight = 40f;
+        private static volatile float _toastWidth = 260f;
+        private static volatile float _toastHeight = 55f;
+        private static volatile float _globalDpi = 1.0f;
 
-        public const int STANDBY_WIDTH = 130;
-        public const int MEDIA_WIDTH = 260;
+        public static float STANDBY_WIDTH { get => _standbyWidth; set => _standbyWidth = value; }
+        public static float BASE_HEIGHT { get => _baseHeight; set => _baseHeight = value; }
+        public static float MEDIA_WIDTH { get => _mediaWidth; set => _mediaWidth = value; }
+        public static float MEDIA_HEIGHT { get => _mediaHeight; set => _mediaHeight = value; }
+        public static float TOAST_WIDTH { get => _toastWidth; set => _toastWidth = value; }
+        public static float TOAST_HEIGHT { get => _toastHeight; set => _toastHeight = value; }
+        public static float GLOBAL_DPI { get => _globalDpi; set => _globalDpi = value; }
+        public static int ThemeMode { get; set; } = 0; // 0=黑, 1=白, 2=跟随系统
+        public static int NotchStyle { get; set; } = 0; // 0=经典刘海, 1=灵动岛
+        public static int StandbyDisplayMode { get; set; } = 0; // 0=时间日期, 1=空白
+        private static SKColor _currentTextColor = SKColors.White;
+        private static SKColor _currentSubTextColor = new SKColor(200, 200, 200);
+        public static void ApplyThemeColors() // 刷新颜色的方法
+        {
+            bool isLight = ThemeMode == 1;
+            if (ThemeMode == 2) // 跟随系统
+            {
+                try
+                {
+                    using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                    if (key != null && key.GetValue("AppsUseLightTheme") is int val) isLight = val == 1;
+                }
+                catch { }
+            }
+
+            // 预计算颜色，避免在渲染树中生成新对象
+            var bg = isLight ? SKColors.White : SKColors.Black;
+            _currentTextColor = isLight ? SKColors.Black : SKColors.White;
+            _currentSubTextColor = isLight ? new SKColor(80, 80, 80) : new SKColor(200, 200, 200);
+
+            // 直接复写已存在的静态画笔属性 (极致内存复用)
+            _bgPaint.Color = bg;
+            _titlePaint.Color = _currentTextColor;
+            _bodyPaint.Color = _currentSubTextColor;
+            _textPaint.Color = _currentTextColor;
+            _timePaint.Color = _currentTextColor;
+            _datePaint.Color = _currentSubTextColor;
+            _mediaIconPaint.Color = _currentTextColor;
+            _barPaint.Color = _currentTextColor;
+            _shadowPaint.Color = _currentTextColor.WithAlpha(50);
+
+            // 渐变着色器需要重新生成一次，但必须先手动释放旧的，防止非托管内存泄漏
+            _fadePaint.Shader?.Dispose();
+            _fadePaint.Shader = SKShader.CreateLinearGradient(
+                new SKPoint(0, 0), new SKPoint(1, 0),
+                [bg.WithAlpha(0), bg],
+                null, SKShaderTileMode.Clamp);
+        }
+
+        // 动态计算最大边界，防止因刘海变大导致出界
+        // 包含待机尺寸(STANDBY/BASE)，并增加灵动岛下沉和弹性动画拉伸时的溢出安全边距
+        public static float WINDOW_WIDTH => Math.Max(320f, Math.Max(STANDBY_WIDTH, Math.Max(MEDIA_WIDTH, TOAST_WIDTH)) + 80f);
+        public static float MAX_WINDOW_HEIGHT => Math.Max(70f, Math.Max(BASE_HEIGHT, Math.Max(TOAST_HEIGHT, MEDIA_HEIGHT)) + 45f);
 
         public const int OUTER_R = 14;
         public const int INNER_R = 12;
@@ -31,7 +84,7 @@ namespace NotchPeninsula
 
         private static readonly SKPaint _titlePaint = new() { Color = SKColors.White, TextSize = 13.5f, IsAntialias = true, Typeface = _boldTypeface };
         private static readonly SKPaint _bodyPaint = new() { Color = new SKColor(200, 200, 200), TextSize = 11.5f, IsAntialias = true, Typeface = _normalTypeface };
-        private static readonly SKPaint _textPaint = new() { Color = SKColors.White, TextSize = 13, IsAntialias = true, Typeface = _semiBoldTypeface };
+        private static readonly SKPaint _textPaint = new() { Color = SKColors.White, TextSize = 12f, IsAntialias = true, Typeface = _semiBoldTypeface };
 
         private static readonly SKPaint _shadowPaint = new() { IsAntialias = true, Color = SKColors.White.WithAlpha(50), MaskFilter = SKMaskFilter.CreateBlur(SKBlurStyle.Outer, 1.5f) };
         private static readonly SKPaint _mediaIconPaint = new() { Color = SKColors.White, IsAntialias = true, Style = SKPaintStyle.Fill };
@@ -130,7 +183,7 @@ namespace NotchPeninsula
         private static float _cachedToastTitleWidth = 0f;
         private static float _cachedToastBodyWidth = 0f;
 
-        public static void Draw(SKCanvas canvas, MediaController media, bool isHovered, float currentWidth, float currentHeight, float startupProgress = 1f, float[]? bars = null, ToastData? toast = null)
+        public static void Draw(SKCanvas canvas, MediaController media, bool isHovered, float currentWidth, float currentHeight, float startupProgress = 1f, float[]? bars = null, ToastData? toast = null, float styleProgress = 0f, float transitionAlpha = 1f)
         {
             if (!System.Threading.Monitor.TryEnter(_renderLock)) return;
             try
@@ -143,21 +196,61 @@ namespace NotchPeninsula
                 int btnPlayX = (int)right - 60;
                 int btnNextX = (int)right - 30;
 
+                // 灵动岛悬浮距离顶部的 Y 轴高度 (随过渡进度平滑变化)
+                float topY = 12f * styleProgress;
+
+                canvas.Save();
+                // 整个画布向下平移，让内部所有元素自动完美适应居中，零开销！
+                canvas.Translate(0, topY);
+
                 _bgPath.Rewind();
-                _bgPath.MoveTo(left - OUTER_R, 0);
-                _bgPath.QuadTo(left, 0, left, OUTER_R);
-                _bgPath.LineTo(left, currentHeight - INNER_R);
-                _bgPath.QuadTo(left, currentHeight, left + INNER_R, currentHeight);
-                _bgPath.LineTo(right - INNER_R, currentHeight);
-                _bgPath.QuadTo(right, currentHeight, right, currentHeight - INNER_R);
-                _bgPath.LineTo(right, OUTER_R);
-                _bgPath.QuadTo(right, 0, right + OUTER_R, 0);
+
+                // 自动把四个圆角调到最大，动态计算插值半径
+                // 刘海形态时是 INNER_R，灵动岛形态时是当前高度的一半（完美的胶囊圆角）
+                float rBottom = INNER_R * (1 - styleProgress) + (currentHeight / 2f) * styleProgress;
+                float rTopY = OUTER_R * (1 - styleProgress) + (currentHeight / 2f) * styleProgress;
+                float rTopX = -OUTER_R * (1 - styleProgress) + (currentHeight / 2f) * styleProgress;
+
+                // 纯数学魔法：完美正圆形的 Conic 曲线权重 (Math.Sqrt(2) / 2)
+                float w = 0.70710678f;
+
+                // 纯数学变形算法：全部使用 ConicTo 替换 QuadTo 强制生成完美圆形弧度
+                _bgPath.MoveTo(left + rTopX, 0);
+                _bgPath.ConicTo(left, 0, left, rTopY, w);
+                _bgPath.LineTo(left, currentHeight - rBottom);
+                _bgPath.ConicTo(left, currentHeight, left + rBottom, currentHeight, w);
+                _bgPath.LineTo(right - rBottom, currentHeight);
+                _bgPath.ConicTo(right, currentHeight, right, currentHeight - rBottom, w);
+                _bgPath.LineTo(right, rTopY);
+                _bgPath.ConicTo(right, 0, right - rTopX, 0, w);
                 _bgPath.Close();
 
                 canvas.DrawPath(_bgPath, _bgPaint);
 
                 canvas.Save();
                 canvas.ClipPath(_bgPath, SKClipOperation.Intersect, true);
+
+                // 保留纯粹的透明度叠化，去除多余上浮
+                byte alpha = (byte)(255 * startupProgress * transitionAlpha);
+                float textOffsetY = 0f;
+
+                // 仅恢复原版代码中软件刚启动时的位移，不影响状态切换
+                if (!media.IsActive && startupProgress < 1f)
+                {
+                    textOffsetY = (1f - startupProgress) * 15f;
+                }
+
+                SKColor currentA = _currentTextColor.WithAlpha(alpha);
+                SKColor subA = _currentSubTextColor.WithAlpha(alpha);
+
+                _titlePaint.Color = currentA;
+                _bodyPaint.Color = subA;
+                _textPaint.Color = currentA;
+                _timePaint.Color = currentA;
+                _datePaint.Color = subA;
+                _mediaIconPaint.Color = currentA;
+                _barPaint.Color = currentA;
+                _highQualitySampling.Color = SKColors.White.WithAlpha(alpha); // 同步作用于图片图标
 
                 // ---------------- [ Toast 消息通知 ] ----------------
                 if (toast != null)
@@ -242,6 +335,7 @@ namespace NotchPeninsula
                     }
 
                     canvas.Restore();
+                    canvas.Restore();
                     return;
                 }
 
@@ -274,19 +368,10 @@ namespace NotchPeninsula
                     }
                 }
 
-                // 启动动画的透明度与Y轴偏移控制
-                float textOffsetY = 0f;
-                byte alpha = 255;
-                if (!media.IsActive && startupProgress < 1f)
-                {
-                    textOffsetY = (1f - startupProgress) * 15f;
-                    alpha = (byte)(255 * startupProgress);
-                }
-
                 // 拆分绘制逻辑
                 if (media.IsActive)
                 {
-                    _textPaint.Color = SKColors.White.WithAlpha(alpha);
+                    _textPaint.Color = _currentTextColor.WithAlpha(alpha);
                     float textY = (currentHeight - _cachedMediaTextHeight) / 2 - _cachedMediaTextTop + 0.3f + textOffsetY;
                     float textX = left + 16;
 
@@ -328,13 +413,18 @@ namespace NotchPeninsula
 
                     if (isHovered)
                     {
+                        // 动态计算 Y 轴绝对居中，替代写死的 11 和 12
+                        // 上一曲/下一曲图标高度为 10f，播放/暂停图标高度为 12f
+                        float prevNextY = (currentHeight - 10f) / 2f;
+                        float playPauseY = (currentHeight - 12f) / 2f;
+
                         // 鼠标悬停时显示播放控制按钮
-                        DrawSvgPath(canvas, _mediaIconPaint, btnPrevX + 11, 12, _prevPath);
+                        DrawSvgPath(canvas, _mediaIconPaint, btnPrevX + 11, prevNextY, _prevPath);
                         if (media.IsPlaying)
-                            DrawSvgPath(canvas, _mediaIconPaint, btnPlayX + 10, 11, _pausePath);
+                            DrawSvgPath(canvas, _mediaIconPaint, btnPlayX + 10, playPauseY, _pausePath);
                         else
-                            DrawSvgPath(canvas, _mediaIconPaint, btnPlayX + 11, 11, _playPath);
-                        DrawSvgPath(canvas, _mediaIconPaint, btnNextX + 11, 12, _nextPath);
+                            DrawSvgPath(canvas, _mediaIconPaint, btnPlayX + 11, playPauseY, _playPath);
+                        DrawSvgPath(canvas, _mediaIconPaint, btnNextX + 11, prevNextY, _nextPath);
                     }
                     else if (bars != null)
                     {
@@ -355,11 +445,12 @@ namespace NotchPeninsula
                         }
                     }
                 }
-                else
+                // 改为:
+                else if (StandbyDisplayMode == 0)
                 {
                     // 待机状态：左右布局，两端对齐
-                    _timePaint.Color = SKColors.White.WithAlpha(alpha);
-                    _datePaint.Color = new SKColor(200, 200, 200, alpha);
+                    _timePaint.Color = _currentTextColor.WithAlpha(alpha);
+                    _datePaint.Color = _currentSubTextColor.WithAlpha(alpha);
 
                     // 统一 Y 轴基线，实现光学垂直居中 (5f 是基于当前字号的基线下沉补偿)
                     float baselineY = currentHeight / 2f + 5f + textOffsetY;
@@ -371,8 +462,8 @@ namespace NotchPeninsula
                     canvas.DrawText(_cachedTimeStr, timeX, baselineY, _timePaint);
                     canvas.DrawText(_cachedDateStr, dateX, baselineY, _datePaint);
                 }
-
                 canvas.Restore();
+                canvas.Restore(); // 恢复 Translate 对外部环境的影响
             }
             finally
             {

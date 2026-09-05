@@ -1,9 +1,8 @@
-﻿using System;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace NotchPeninsula
 {
-    public static class Win32
+    public static partial class Win32
     {
         public const int WS_POPUP = unchecked((int)0x80000000);
         public const int WS_VISIBLE = 0x10000000;
@@ -200,5 +199,11 @@ namespace NotchPeninsula
 
         [DllImport("user32.dll")]
         public static extern uint GetDpiForSystem();
+
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        public static extern void PostQuitMessage(int nExitCode);
     }
 }

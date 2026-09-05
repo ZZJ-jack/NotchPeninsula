@@ -45,7 +45,16 @@ namespace NotchPeninsula
         private bool _displayDropdownHovered = false;
         private int _hoveredDisplayDropdownIndex = -1;
         private int _selectedDisplayIndex = 0;
-        private static readonly string[] _displayOptions = ["时间日期"];
+        private static readonly string[] _displayOptions = ["时间日期", "空白"];
+        private int _hoveredStyleIndex = -1;
+        // 个性化中心状态
+        private int _hoveredMinusIndex = -1;
+        private int _hoveredPlusIndex = -1;
+        private int _hoveredResetIndex = -1;
+        private float[] _customValues = new float[7];
+        private static readonly float[] _defaultCustomValues = [130f, 34f, 260f, 40f, 260f, 55f, 1.0f];
+        private readonly string[] _valStrCache = new string[7];
+        private int _hoveredThemeIndex = -1; // -1:无, 0:黑, 1:白, 2:系统
         // DPI 缩放相关
         private float _dpiScale = 1f;
         private int _scaledWidth;
@@ -61,6 +70,38 @@ namespace NotchPeninsula
             ("echomusic", "Echo Music"),
             ("lxmusic", "LX Music")
         ];
+        // 极致内存优化：全局复用画笔缓存
+        private static readonly SKPaint _bgPaint = new SKPaint { Color = new SKColor(32, 32, 32), IsAntialias = true };
+        private static readonly SKPaint _titleBarPaint = new SKPaint { Color = new SKColor(40, 40, 40) };
+        private static readonly SKPaint _uiTextPaint = new SKPaint { Color = SKColors.White, TextSize = 13.5f, IsAntialias = true, Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI") };
+        private static readonly SKPaint _subTextPaint = new SKPaint { Color = new SKColor(170, 170, 170), TextSize = 12f, IsAntialias = true, Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI") };
+        private static readonly SKPaint _titleTextPaint = new SKPaint { Color = new SKColor(200, 200, 200), TextSize = 12.5f, IsAntialias = true, Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI") };
+        private static readonly SKPaint _hqSamplingOpts = new SKPaint { FilterQuality = SKFilterQuality.High, IsAntialias = true };
+        private static readonly SKPaint _iconPaint = new SKPaint { Color = SKColors.White, Style = SKPaintStyle.Stroke, StrokeWidth = 1f, IsAntialias = true };
+
+        // 窗口控制按钮画笔
+        private static readonly SKPaint _hoverMinPaint = new SKPaint { Color = new SKColor(255, 255, 255, 20) };
+        private static readonly SKPaint _hoverClosePaint = new SKPaint { Color = new SKColor(232, 17, 35) };
+
+        // 侧边栏与卡片画笔
+        private static readonly SKPaint _tabBgSelected = new SKPaint { Color = new SKColor(255, 255, 255, 15), IsAntialias = true };
+        private static readonly SKPaint _tabBgHovered = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
+        private static readonly SKPaint _tabIndicator = new SKPaint { Color = new SKColor(0, 120, 212), IsAntialias = true };
+        private static readonly SKPaint _cardBg = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
+        private static readonly SKPaint _cardBorder = new SKPaint { Color = new SKColor(255, 255, 255, 15), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        private static readonly SKPaint _separatorPaint = new SKPaint { Color = new SKColor(255, 255, 255, 20), StrokeWidth = 1, IsAntialias = true };
+
+        // UI 组件画笔
+        private static readonly SKPaint _chevronPaint = new SKPaint { Color = new SKColor(150, 150, 150), Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, IsAntialias = true };
+        private static readonly SKPaint _menuBg = new SKPaint { Color = new SKColor(40, 40, 40), IsAntialias = true };
+        private static readonly SKPaint _menuBorder = new SKPaint { Color = new SKColor(80, 80, 80), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        private static readonly SKPaint _globalBorderPaint = new SKPaint { Color = new SKColor(60, 60, 60), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
+        private static readonly SKPaint _toggleCirclePaint = new SKPaint { Color = SKColors.White, IsAntialias = true };
+
+        // 动态状态画笔 (专门用于需要根据 Hover 状态变色的元素)
+        private static readonly SKPaint _dynamicFillPaint = new SKPaint { IsAntialias = true };
+        private static readonly SKPaint _dynamicStrokePaint = new SKPaint { Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, IsAntialias = true };
+        private static readonly SKPaint _dynamicTextPaint = new SKPaint { TextSize = 13f, IsAntialias = true, Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI") };
 
         public static void Toggle()
         {
@@ -78,6 +119,13 @@ namespace NotchPeninsula
         private ConsoleWindow()
         {
             _isAutoStartEnabled = NotchWindow.IsAutoStartEnabled();
+            _customValues[0] = Renderer.STANDBY_WIDTH;
+            _customValues[1] = Renderer.BASE_HEIGHT;
+            _customValues[2] = Renderer.MEDIA_WIDTH;
+            _customValues[3] = Renderer.MEDIA_HEIGHT;
+            _customValues[4] = Renderer.TOAST_WIDTH;
+            _customValues[5] = Renderer.TOAST_HEIGHT;
+            _customValues[6] = Renderer.GLOBAL_DPI;
 
             // 匹配目前加载的媒体平台索引
             for (int i = 0; i < _platforms.Length; i++)
@@ -155,7 +203,18 @@ namespace NotchPeninsula
                 IntPtr.Zero, IntPtr.Zero, Marshal.GetHINSTANCE(typeof(ConsoleWindow).Module), IntPtr.Zero
             );
 
+            for (int i = 0; i < 7; i++)
+            {
+                UpdateValueString(i);
+            }
+
+            _selectedDisplayIndex = Renderer.StandbyDisplayMode; // 初始化时同步当前选择
             Render();
+        }
+
+        private void UpdateValueString(int index)
+        {
+            _valStrCache[index] = index == 6 ? $"{_customValues[index]:F2} x" : $"{(int)_customValues[index]} px";
         }
 
         private static IntPtr StaticWndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -176,17 +235,41 @@ namespace NotchPeninsula
                     bool newMinHovered = x >= WIDTH - 92 && x < WIDTH - 46 && y <= TITLE_BAR_HEIGHT;
                     bool newCloseHovered = x >= WIDTH - 46 && x <= WIDTH && y <= TITLE_BAR_HEIGHT;
 
-                    // Tab Hover 判定
+                    // Tab Hover 判定（匹配新的视觉排版位置与分割线）
                     int newHoveredTab = -1;
-                    if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 10 && y <= TITLE_BAR_HEIGHT + 46) newHoveredTab = 0; // 通用设置
-                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 50 && y <= TITLE_BAR_HEIGHT + 86) newHoveredTab = 1; // 显示设置
-                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 90 && y <= TITLE_BAR_HEIGHT + 126) newHoveredTab = 2; // 媒体设置
-                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 130 && y <= TITLE_BAR_HEIGHT + 166) newHoveredTab = 3; // 交互设置
-                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 170 && y <= TITLE_BAR_HEIGHT + 206) newHoveredTab = 4; // 关于页
+                    if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 10 && y <= TITLE_BAR_HEIGHT + 46) newHoveredTab = 5;      // 1. 个性化中心
+                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 60 && y <= TITLE_BAR_HEIGHT + 96) newHoveredTab = 0; // 2. 通用设置
+                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 100 && y <= TITLE_BAR_HEIGHT + 136) newHoveredTab = 1; // 3. 显示设置
+                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 140 && y <= TITLE_BAR_HEIGHT + 176) newHoveredTab = 2; // 4. 媒体设置
+                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 180 && y <= TITLE_BAR_HEIGHT + 216) newHoveredTab = 3; // 5. 交互设置
+                    else if (x >= 10 && x <= 170 && y >= TITLE_BAR_HEIGHT + 230 && y <= TITLE_BAR_HEIGHT + 266) newHoveredTab = 4; // 6. 关于软件
+
+                    int newHoveredTheme = -1;
+                    int newHoverMinus = -1, newHoverPlus = -1, newHoverReset = -1;
+                    if (_selectedTab == 5)
+                    {
+                        // 避免和下面的 rightX 冲突，改名为 themeRightX
+                        float themeRightX = WIDTH - 36;
+                        float themeY = GetBtnY(-1);
+
+                        // 主题按钮的三个胶囊热区
+                        if (x >= themeRightX - 140 && x <= themeRightX - 100 && y >= themeY && y <= themeY + 24) newHoveredTheme = 0;
+                        if (x >= themeRightX - 90 && x <= themeRightX - 50 && y >= themeY && y <= themeY + 24) newHoveredTheme = 1;
+                        if (x >= themeRightX - 40 && x <= themeRightX && y >= themeY && y <= themeY + 24) newHoveredTheme = 2;
+
+                        for (int i = 0; i < 7; i++)
+                        {
+                            float btnY = GetBtnY(i);
+                            float rightX = WIDTH - 36; // 保持原有变量不动
+                            if (x >= rightX - 175 && x <= rightX - 145 && y >= btnY && y <= btnY + 24) newHoverMinus = i;
+                            if (x >= rightX - 80 && x <= rightX - 50 && y >= btnY && y <= btnY + 24) newHoverPlus = i;
+                            if (x >= rightX - 40 && x <= rightX && y >= btnY && y <= btnY + 24) newHoverReset = i;
+                        }
+                    }
 
                     bool newDisplayDropdownHovered = false;
                     int newHoveredDisplayDropdownIndex = -1;
-
+                    int newHoveredStyleIndex = -1;
                     bool newToggleHovered = false;
                     bool newToastToggleHovered = false;
                     bool newMediaToggleHovered = false;
@@ -205,14 +288,20 @@ namespace NotchPeninsula
                     }
                     else if (_selectedTab == 1) // 显示设置
                     {
-                        // 下拉菜单判定 (直接位于顶部第一张卡片)
-                        if (!_displayDropdownOpen && x >= WIDTH - 140 && x <= WIDTH - 30 && y >= TITLE_BAR_HEIGHT + 26 && y <= TITLE_BAR_HEIGHT + 58)
+                        // 刘海形态选择器的点击热区
+                        float styleY = TITLE_BAR_HEIGHT + 50;
+                        if (x >= 220 && x <= 370 && y >= styleY && y <= styleY + 90) newHoveredStyleIndex = 0;
+                        if (x >= 390 && x <= 540 && y >= styleY && y <= styleY + 90) newHoveredStyleIndex = 1;
+
+                        // 下拉菜单判定 (原卡片整体下移避让)
+                        float dY = TITLE_BAR_HEIGHT + 186; // 172 + 14
+                        if (!_displayDropdownOpen && x >= WIDTH - 140 && x <= WIDTH - 30 && y >= dY && y <= dY + 32)
                             newDisplayDropdownHovered = true;
 
                         if (_displayDropdownOpen)
                         {
-                            if (x >= WIDTH - 140 && x <= WIDTH - 30 && y >= TITLE_BAR_HEIGHT + 60 && y < TITLE_BAR_HEIGHT + 60 + _displayOptions.Length * 26)
-                                newHoveredDisplayDropdownIndex = (y - (TITLE_BAR_HEIGHT + 60)) / 26;
+                            if (x >= WIDTH - 140 && x <= WIDTH - 30 && y >= dY + 34 && y < dY + 34 + _displayOptions.Length * 26)
+                                newHoveredDisplayDropdownIndex = (y - (int)(dY + 34)) / 26;
                         }
                     }
                     else if (_selectedTab == 2) // 媒体设置
@@ -261,7 +350,11 @@ namespace NotchPeninsula
                         newDropdownHovered != _dropdownHovered ||
                         newHoveredDropdownIndex != _hoveredDropdownIndex || newHoveredLinkIndex != _hoveredLinkIndex ||
                         newDisplayDropdownHovered != _displayDropdownHovered ||
-                        newHoveredDisplayDropdownIndex != _hoveredDisplayDropdownIndex)
+                        newHoveredDisplayDropdownIndex != _hoveredDisplayDropdownIndex ||
+                        newHoveredStyleIndex != _hoveredStyleIndex ||
+                        newHoverMinus != _hoveredMinusIndex || newHoverPlus != _hoveredPlusIndex ||
+                        newHoverReset != _hoveredResetIndex ||
+                        newHoveredTheme != _hoveredThemeIndex)
                     {
                         _minHovered = newMinHovered; _closeHovered = newCloseHovered;
                         _hoveredTab = newHoveredTab; _toggleHovered = newToggleHovered;
@@ -272,6 +365,11 @@ namespace NotchPeninsula
                         _hoveredLinkIndex = newHoveredLinkIndex;
                         _displayDropdownHovered = newDisplayDropdownHovered;
                         _hoveredDisplayDropdownIndex = newHoveredDisplayDropdownIndex;
+                        _hoveredStyleIndex = newHoveredStyleIndex;
+                        _hoveredMinusIndex = newHoverMinus;
+                        _hoveredPlusIndex = newHoverPlus;
+                        _hoveredResetIndex = newHoverReset;
+                        _hoveredThemeIndex = newHoveredTheme;
                         Render();
                     }
                     break;
@@ -295,11 +393,54 @@ namespace NotchPeninsula
                     {
                         _displayDropdownOpen = false; Render();
                     }
+                    else if (_selectedTab == 1 && _hoveredStyleIndex != -1)
+                    {
+                        Renderer.NotchStyle = _hoveredStyleIndex;
+                        Program.SaveSetting("NotchStyle", _hoveredStyleIndex);
+                        Render();
+                    }
                     else if (_hoveredTab == 0 && _selectedTab != 0) { _selectedTab = 0; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
                     else if (_hoveredTab == 1 && _selectedTab != 1) { _selectedTab = 1; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
                     else if (_hoveredTab == 2 && _selectedTab != 2) { _selectedTab = 2; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
                     else if (_hoveredTab == 3 && _selectedTab != 3) { _selectedTab = 3; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
                     else if (_hoveredTab == 4 && _selectedTab != 4) { _selectedTab = 4; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
+                    else if (_hoveredTab == 5 && _selectedTab != 5) { _selectedTab = 5; _dropdownOpen = false; _displayDropdownOpen = false; Render(); }
+                    else if (_selectedTab == 5 && (_hoveredMinusIndex != -1 || _hoveredPlusIndex != -1 || _hoveredResetIndex != -1))
+                    {
+                        int updateIdx;
+                        if (_hoveredResetIndex != -1)
+                        {
+                            updateIdx = _hoveredResetIndex;
+                            float[] defaultVals = { 130f, 34f, 260f, 40f, 260f, 55f, 1.0f };
+                            _customValues[updateIdx] = defaultVals[updateIdx];
+                        }
+                        else
+                        {
+                            updateIdx = _hoveredMinusIndex != -1 ? _hoveredMinusIndex : _hoveredPlusIndex;
+                            float delta = _hoveredPlusIndex != -1 ? (updateIdx == 6 ? 0.05f : 5f) : (updateIdx == 6 ? -0.05f : -5f);
+                            _customValues[updateIdx] = Math.Max(updateIdx == 6 ? 0.5f : 20f, _customValues[updateIdx] + delta);
+                        }
+
+                        // 数值变动时才更新字符串缓存，避免渲染循环产生 GC 垃圾
+                        UpdateValueString(updateIdx);
+
+                        if (updateIdx == 0) { Renderer.STANDBY_WIDTH = _customValues[0]; Program.SaveSetting("Custom_StandbyW", _customValues[0]); }
+                        else if (updateIdx == 1) { Renderer.BASE_HEIGHT = _customValues[1]; Program.SaveSetting("Custom_BaseH", _customValues[1]); }
+                        else if (updateIdx == 2) { Renderer.MEDIA_WIDTH = _customValues[2]; Program.SaveSetting("Custom_MediaW", _customValues[2]); }
+                        else if (updateIdx == 3) { Renderer.MEDIA_HEIGHT = _customValues[3]; Program.SaveSetting("Custom_MediaH", _customValues[3]); }
+                        else if (updateIdx == 4) { Renderer.TOAST_WIDTH = _customValues[4]; Program.SaveSetting("Custom_ToastW", _customValues[4]); }
+                        else if (updateIdx == 5) { Renderer.TOAST_HEIGHT = _customValues[5]; Program.SaveSetting("Custom_ToastH", _customValues[5]); }
+                        else if (updateIdx == 6) { Renderer.GLOBAL_DPI = _customValues[6]; Program.SaveSetting("Custom_Dpi", _customValues[6]); }
+
+                        Render();
+                    }
+                    else if (_selectedTab == 5 && _hoveredThemeIndex != -1)
+                    {
+                        Renderer.ThemeMode = _hoveredThemeIndex;
+                        Renderer.ApplyThemeColors(); // 立即反转画笔颜色
+                        Program.SaveSetting("ThemeMode", _hoveredThemeIndex);
+                        Render(); // 刷新控制台UI
+                    }
                     else if (_selectedTab == 4 && _hoveredLinkIndex != -1)
                     {
                         string[] urls = [
@@ -373,6 +514,8 @@ namespace NotchPeninsula
                     else if (_displayDropdownOpen && _hoveredDisplayDropdownIndex != -1)
                     {
                         _selectedDisplayIndex = _hoveredDisplayDropdownIndex;
+                        Renderer.StandbyDisplayMode = _selectedDisplayIndex; // 同步给渲染器
+                        Program.SaveSetting("StandbyDisplayMode", _selectedDisplayIndex); // 直接持久化保存
                         _displayDropdownOpen = false;
                         Render();
                     }
@@ -385,21 +528,34 @@ namespace NotchPeninsula
             return Win32.DefWindowProc(hwnd, msg, wParam, lParam);
         }
 
+        private float GetBtnY(int index)
+        {
+            return index switch
+            {
+                -1 => TITLE_BAR_HEIGHT + 35,                 // 精准对应卡片高度的垂直中位线
+                0 => TITLE_BAR_HEIGHT + 92 + 40,             // 待机宽度
+                1 => TITLE_BAR_HEIGHT + 92 + 40 + 34,
+                2 => TITLE_BAR_HEIGHT + 210 + 40,            // 媒体宽度
+                3 => TITLE_BAR_HEIGHT + 210 + 40 + 34,
+                4 => TITLE_BAR_HEIGHT + 328 + 40,            // 通知宽度
+                5 => TITLE_BAR_HEIGHT + 328 + 40 + 34,
+                6 => TITLE_BAR_HEIGHT + 446 + 40,            // DPI 缩放
+                _ => 0
+            };
+        }
+
         private unsafe void Render()
         {
             var info = new SKImageInfo(_scaledWidth, _scaledHeight, SKColorType.Bgra8888, SKAlphaType.Premul);
             using var surface = SKSurface.Create(info);
             var canvas = surface.Canvas;
 
-            // 调用 Skia 硬件级矩阵缩放
             canvas.Scale(_dpiScale);
-
             canvas.Clear(SKColors.Transparent);
             float cornerRadius = 8f;
             var windowRect = new SKRect(0, 0, WIDTH, HEIGHT);
 
-            using var bgPaint = new SKPaint { Color = new SKColor(32, 32, 32), IsAntialias = true };
-            canvas.DrawRoundRect(windowRect, cornerRadius, cornerRadius, bgPaint);
+            canvas.DrawRoundRect(windowRect, cornerRadius, cornerRadius, _bgPaint);
 
             canvas.Save();
             using var clipPath = new SKPath();
@@ -407,239 +563,380 @@ namespace NotchPeninsula
             canvas.ClipPath(clipPath, SKClipOperation.Intersect, true);
 
             // 标题栏区
-            using var titleBarPaint = new SKPaint { Color = new SKColor(40, 40, 40) };
-            canvas.DrawRect(0, 0, WIDTH, TITLE_BAR_HEIGHT, titleBarPaint);
+            canvas.DrawRect(0, 0, WIDTH, TITLE_BAR_HEIGHT, _titleBarPaint);
 
             float textX = 14f;
             if (_appIconBitmap != null)
             {
-                // 标题栏图标：16x16 逻辑像素，FilterQuality.High 确保从 256→16 是高质量 Lanczos 缩放
                 var iconRect = new SKRect(14, 8, 14 + 16, 8 + 16);
-                using var samplingOpts = new SKPaint { FilterQuality = SKFilterQuality.High, IsAntialias = true };
-                canvas.DrawBitmap(_appIconBitmap, iconRect, samplingOpts);
+                canvas.DrawBitmap(_appIconBitmap, iconRect, _hqSamplingOpts);
                 textX += 24f;
             }
 
-            using var uiTextPaint = new SKPaint { Color = SKColors.White, TextSize = 13.5f, IsAntialias = true, Typeface = SKTypeface.FromFamilyName("Microsoft YaHei UI") };
-            using var subTextPaint = new SKPaint { Color = new SKColor(170, 170, 170), TextSize = 12f, IsAntialias = true, Typeface = uiTextPaint.Typeface };
+            canvas.DrawText(_appTitleWithVersion, textX, 21.2f, _titleTextPaint);
 
-            using var titleTextPaint = new SKPaint { Color = new SKColor(200, 200, 200), TextSize = 12.5f, IsAntialias = true, Typeface = uiTextPaint.Typeface };
-            canvas.DrawText(_appTitleWithVersion, textX, 21.2f, titleTextPaint);
+            if (_minHovered) canvas.DrawRect(WIDTH - 92, 0, 46, TITLE_BAR_HEIGHT, _hoverMinPaint);
+            if (_closeHovered) canvas.DrawRect(WIDTH - 46, 0, 46, TITLE_BAR_HEIGHT, _hoverClosePaint);
 
-            if (_minHovered) { using var hp = new SKPaint { Color = new SKColor(255, 255, 255, 20) }; canvas.DrawRect(WIDTH - 92, 0, 46, TITLE_BAR_HEIGHT, hp); }
-            if (_closeHovered) { using var hp = new SKPaint { Color = new SKColor(232, 17, 35) }; canvas.DrawRect(WIDTH - 46, 0, 46, TITLE_BAR_HEIGHT, hp); }
-
-            using var iconPaint = new SKPaint { Color = SKColors.White, Style = SKPaintStyle.Stroke, StrokeWidth = 1f, IsAntialias = true };
-            canvas.DrawLine(WIDTH - 92 + 18, 16, WIDTH - 92 + 28, 16, iconPaint);
+            canvas.DrawLine(WIDTH - 92 + 18, 16, WIDTH - 92 + 28, 16, _iconPaint);
             float cx = WIDTH - 46 + 23; float cy = 16;
-            canvas.DrawLine(cx - 5, cy - 5, cx + 5, cy + 5, iconPaint);
-            canvas.DrawLine(cx + 5, cy - 5, cx - 5, cy + 5, iconPaint);
+            canvas.DrawLine(cx - 5, cy - 5, cx + 5, cy + 5, _iconPaint);
+            canvas.DrawLine(cx + 5, cy - 5, cx - 5, cy + 5, _iconPaint);
 
-            // 侧边栏
+            // 侧边栏重排与分割线绘制
             void DrawTab(int index, string label, float yOffset)
             {
                 var tabRect = new SKRect(10, TITLE_BAR_HEIGHT + yOffset, 170, TITLE_BAR_HEIGHT + yOffset + 36);
                 if (_selectedTab == index)
                 {
-                    using var tabBg = new SKPaint { Color = new SKColor(255, 255, 255, 15), IsAntialias = true };
-                    canvas.DrawRoundRect(tabRect, 4, 4, tabBg);
-                    using var indicator = new SKPaint { Color = new SKColor(0, 120, 212), IsAntialias = true };
-                    canvas.DrawRoundRect(new SKRect(10, TITLE_BAR_HEIGHT + yOffset + 8, 13, TITLE_BAR_HEIGHT + yOffset + 28), 1.5f, 1.5f, indicator);
+                    canvas.DrawRoundRect(tabRect, 4, 4, _tabBgSelected);
+                    canvas.DrawRoundRect(new SKRect(10, TITLE_BAR_HEIGHT + yOffset + 8, 13, TITLE_BAR_HEIGHT + yOffset + 28), 1.5f, 1.5f, _tabIndicator);
                 }
                 else if (_hoveredTab == index)
                 {
-                    using var tabBg = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
-                    canvas.DrawRoundRect(tabRect, 4, 4, tabBg);
+                    canvas.DrawRoundRect(tabRect, 4, 4, _tabBgHovered);
                 }
-                canvas.DrawText(label, 30, TITLE_BAR_HEIGHT + yOffset + 24, uiTextPaint);
+                canvas.DrawText(label, 30, TITLE_BAR_HEIGHT + yOffset + 24, _uiTextPaint);
             }
 
-            DrawTab(0, "通用设置", 10);
-            DrawTab(1, "显示设置", 50);  // 调至第二位
-            DrawTab(2, "媒体设置", 90);  // 顺延
-            DrawTab(3, "交互设置", 130); // 顺延
-            DrawTab(4, "关于软件", 170); // 顺延
+            // 个性化中心最上，两条分割线
+            DrawTab(5, "个性化中心", 10);
+            canvas.DrawLine(20, TITLE_BAR_HEIGHT + 52, 160, TITLE_BAR_HEIGHT + 52, _separatorPaint);
+            DrawTab(0, "通用设置", 60);
+            DrawTab(1, "显示设置", 100);
+            DrawTab(2, "媒体设置", 140);
+            DrawTab(3, "交互设置", 180);
+            canvas.DrawLine(20, TITLE_BAR_HEIGHT + 222, 160, TITLE_BAR_HEIGHT + 222, _separatorPaint);
+            DrawTab(4, "关于软件", 230);
 
             // 右侧卡片内容区
             void DrawToggleCard(float yOffset, string title, string sub, bool state, bool hovered)
             {
                 var cardRect = new SKRect(200, TITLE_BAR_HEIGHT + yOffset, WIDTH - 20, TITLE_BAR_HEIGHT + yOffset + 62);
-                using var cardBg = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
-                using var cardBorder = new SKPaint { Color = new SKColor(255, 255, 255, 15), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-                canvas.DrawRoundRect(cardRect, 6, 6, cardBg); canvas.DrawRoundRect(cardRect, 6, 6, cardBorder);
+                canvas.DrawRoundRect(cardRect, 6, 6, _cardBg);
+                canvas.DrawRoundRect(cardRect, 6, 6, _cardBorder);
 
-                canvas.DrawText(title, 216, TITLE_BAR_HEIGHT + yOffset + 26, uiTextPaint);
-                canvas.DrawText(sub, 216, TITLE_BAR_HEIGHT + yOffset + 46, subTextPaint);
+                canvas.DrawText(title, 216, TITLE_BAR_HEIGHT + yOffset + 26, _uiTextPaint);
+                canvas.DrawText(sub, 216, TITLE_BAR_HEIGHT + yOffset + 46, _subTextPaint);
 
                 float tW = 42; float tH = 20; float tX = WIDTH - 20 - 16 - tW; float tY = TITLE_BAR_HEIGHT + yOffset + 20;
                 var tRect = new SKRect(tX, tY, tX + tW, tY + tH);
-                using var tBg = new SKPaint { IsAntialias = true };
-                if (state) { tBg.Color = hovered ? new SKColor(0, 140, 240) : new SKColor(0, 120, 212); canvas.DrawRoundRect(tRect, tH / 2, tH / 2, tBg); }
-                else { tBg.Style = SKPaintStyle.Stroke; tBg.StrokeWidth = 1.5f; tBg.Color = hovered ? new SKColor(150, 150, 150) : new SKColor(100, 100, 100); canvas.DrawRoundRect(tRect, tH / 2, tH / 2, tBg); }
 
-                using var tCircle = new SKPaint { Color = SKColors.White, IsAntialias = true };
-                if (state) canvas.DrawCircle(tX + tW - tH / 2, tY + tH / 2, tH / 2 - 4, tCircle);
-                else { tCircle.Color = hovered ? new SKColor(200, 200, 200) : new SKColor(150, 150, 150); canvas.DrawCircle(tX + tH / 2, tY + tH / 2, tH / 2 - 4, tCircle); }
+                if (state)
+                {
+                    _dynamicFillPaint.Color = hovered ? new SKColor(0, 140, 240) : new SKColor(0, 120, 212);
+                    canvas.DrawRoundRect(tRect, tH / 2, tH / 2, _dynamicFillPaint);
+                }
+                else
+                {
+                    _dynamicStrokePaint.Color = hovered ? new SKColor(150, 150, 150) : new SKColor(100, 100, 100);
+                    canvas.DrawRoundRect(tRect, tH / 2, tH / 2, _dynamicStrokePaint);
+                }
+
+                if (state)
+                {
+                    canvas.DrawCircle(tX + tW - tH / 2, tY + tH / 2, tH / 2 - 4, _toggleCirclePaint);
+                }
+                else
+                {
+                    _toggleCirclePaint.Color = hovered ? new SKColor(200, 200, 200) : new SKColor(150, 150, 150);
+                    canvas.DrawCircle(tX + tH / 2, tY + tH / 2, tH / 2 - 4, _toggleCirclePaint);
+                    _toggleCirclePaint.Color = SKColors.White; // 恢复白色供下次使用
+                }
             }
 
-            if (_selectedTab == 0) // 通用设置
+            if (_selectedTab == 0)
             {
                 DrawToggleCard(12, "开机自启", "跟随系统启动自动运行该程序", _isAutoStartEnabled, _toggleHovered);
                 DrawToggleCard(84, "系统消息通知", "允许在刘海中显示Windows系统的Toast消息", NotchWindow.IsToastEnabled, _toastToggleHovered);
             }
-            else if (_selectedTab == 1) // 显示设置
+            else if (_selectedTab == 1)
             {
-                // 卡片直接贴在顶部 (Y轴 Offset 12)
-                var cardRect = new SKRect(200, TITLE_BAR_HEIGHT + 12, WIDTH - 20, TITLE_BAR_HEIGHT + 74);
-                using var cardBg = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
-                using var cardBorder = new SKPaint { Color = new SKColor(255, 255, 255, 15), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-                canvas.DrawRoundRect(cardRect, 6, 6, cardBg); canvas.DrawRoundRect(cardRect, 6, 6, cardBorder);
+                // 刘海形态两列布局选择器
+                var styleCardRect = new SKRect(200, TITLE_BAR_HEIGHT + 12, WIDTH - 20, TITLE_BAR_HEIGHT + 160);
+                canvas.DrawRoundRect(styleCardRect, 6, 6, _cardBg);
+                canvas.DrawRoundRect(styleCardRect, 6, 6, _cardBorder);
+                canvas.DrawText("刘海形态", 216, TITLE_BAR_HEIGHT + 38, _uiTextPaint);
 
-                canvas.DrawText("待机显示内容", 216, TITLE_BAR_HEIGHT + 38, uiTextPaint);
-                canvas.DrawText("刘海处于待机状态时默认展示的信息", 216, TITLE_BAR_HEIGHT + 58, subTextPaint);
+                void DrawStyleOption(int index, string name, float x, float y)
+                {
+                    bool isSelected = Renderer.NotchStyle == index;
+                    bool isHovered = _hoveredStyleIndex == index;
 
-                // 右侧的伪输入下拉框
-                float dW = 110; float dX = WIDTH - 140; float dY = TITLE_BAR_HEIGHT + 26; float dH = 32;
+                    // 选项外框与背景反馈
+                    var optRect = new SKRect(x, y, x + 150, y + 90);
+                    _dynamicFillPaint.Color = isSelected ? new SKColor(0, 120, 212, 40) : (isHovered ? new SKColor(255, 255, 255, 15) : new SKColor(255, 255, 255, 8));
+                    canvas.DrawRoundRect(optRect, 6, 6, _dynamicFillPaint);
+                    _dynamicStrokePaint.Color = isSelected ? new SKColor(0, 120, 212) : new SKColor(80, 80, 80);
+                    canvas.DrawRoundRect(optRect, 6, 6, _dynamicStrokePaint);
+
+                    // 绘制纯血 Skia 伪 PNG 视觉特效图
+                    float cx = x + 75; float cy = y + 35;
+
+                    // 颜色直接同步真实的明暗逻辑，并完美兼容“跟随系统”模式
+                    bool isLight = Renderer.ThemeMode == 1 || (Renderer.ThemeMode == 2 && Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")?.GetValue("AppsUseLightTheme") is int val && val == 1);
+                    _dynamicFillPaint.Color = isLight ? SKColors.White : SKColors.Black;
+
+                    if (index == 0) // 调整经典刘海的矢量绘图比例，使其视觉高度和灵动岛保持一致
+                    {
+                        var path = new SKPath();
+                        path.MoveTo(cx - 35, cy - 10);
+                        path.QuadTo(cx - 25, cy - 10, cx - 25, cy - 5);
+                        path.LineTo(cx - 25, cy + 5);
+                        path.QuadTo(cx - 25, cy + 10, cx - 15, cy + 10);
+                        path.LineTo(cx + 15, cy + 10);
+                        path.QuadTo(cx + 25, cy + 10, cx + 25, cy + 5);
+                        path.LineTo(cx + 25, cy - 5);
+                        path.QuadTo(cx + 25, cy - 10, cx + 35, cy - 10);
+                        canvas.DrawPath(path, _dynamicFillPaint);
+                    }
+                    else // 模拟灵动岛
+                    {
+                        // 统一高度 20px，圆角 10px 形成胶囊
+                        canvas.DrawRoundRect(new SKRect(cx - 25, cy - 10, cx + 25, cy + 10), 10, 10, _dynamicFillPaint);
+                    }
+
+                    // 单选 Radio 按钮与文本
+                    float radioY = y + 72;
+                    canvas.DrawCircle(cx - 30, radioY - 4, 6, _dynamicStrokePaint);
+                    if (isSelected)
+                    {
+                        _dynamicFillPaint.Color = new SKColor(0, 120, 212);
+                        canvas.DrawCircle(cx - 30, radioY - 4, 3, _dynamicFillPaint);
+                    }
+                    _dynamicTextPaint.Color = isSelected ? new SKColor(0, 140, 240) : SKColors.White;
+                    canvas.DrawText(name, cx - 15, radioY + 1, _dynamicTextPaint);
+                }
+
+                DrawStyleOption(0, "经典刘海", 220, TITLE_BAR_HEIGHT + 50);
+                DrawStyleOption(1, "悬浮胶囊", 390, TITLE_BAR_HEIGHT + 50);
+
+                // 待机显示内容卡片
+                float displayCardY = TITLE_BAR_HEIGHT + 172;
+                var cardRect = new SKRect(200, displayCardY, WIDTH - 20, displayCardY + 62);
+                canvas.DrawRoundRect(cardRect, 6, 6, _cardBg);
+                canvas.DrawRoundRect(cardRect, 6, 6, _cardBorder);
+                canvas.DrawText("待机显示内容", 216, displayCardY + 26, _uiTextPaint);
+                canvas.DrawText("刘海处于待机状态时默认展示的信息", 216, displayCardY + 46, _subTextPaint);
+
+                float dW = 110; float dX = WIDTH - 140; float dY = displayCardY + 14; float dH = 32;
                 var dRect = new SKRect(dX, dY, dX + dW, dY + dH);
-                using var dBg = new SKPaint { Color = _displayDropdownHovered ? new SKColor(255, 255, 255, 15) : new SKColor(255, 255, 255, 8), IsAntialias = true };
-                canvas.DrawRoundRect(dRect, 4, 4, dBg);
-                canvas.DrawText(_displayOptions[_selectedDisplayIndex], dX + 10, dY + 21, uiTextPaint);
+                _dynamicFillPaint.Color = _displayDropdownHovered ? new SKColor(255, 255, 255, 15) : new SKColor(255, 255, 255, 8);
+                canvas.DrawRoundRect(dRect, 4, 4, _dynamicFillPaint);
+                canvas.DrawText(_displayOptions[_selectedDisplayIndex], dX + 10, dY + 21, _uiTextPaint);
 
-                using var chevronPaint = new SKPaint { Color = new SKColor(150, 150, 150), Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, IsAntialias = true };
-                canvas.DrawLine(dX + dW - 20, dY + 14, dX + dW - 15, dY + 19, chevronPaint);
-                canvas.DrawLine(dX + dW - 15, dY + 19, dX + dW - 10, dY + 14, chevronPaint);
+                canvas.DrawLine(dX + dW - 20, dY + 14, dX + dW - 15, dY + 19, _chevronPaint);
+                canvas.DrawLine(dX + dW - 15, dY + 19, dX + dW - 10, dY + 14, _chevronPaint);
             }
-            else if (_selectedTab == 2) // 媒体设置
+            else if (_selectedTab == 2)
             {
                 DrawToggleCard(12, "媒体控制", "允许在刘海中显示和控制系统媒体播放", MediaController.IsMediaControlEnabled, _mediaToggleHovered);
 
-                // 绘制下拉选择卡片
                 var cardRect = new SKRect(200, TITLE_BAR_HEIGHT + 84, WIDTH - 20, TITLE_BAR_HEIGHT + 146);
-                using var cardBg = new SKPaint { Color = new SKColor(255, 255, 255, 8), IsAntialias = true };
-                using var cardBorder = new SKPaint { Color = new SKColor(255, 255, 255, 15), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-                canvas.DrawRoundRect(cardRect, 6, 6, cardBg); canvas.DrawRoundRect(cardRect, 6, 6, cardBorder);
+                canvas.DrawRoundRect(cardRect, 6, 6, _cardBg); canvas.DrawRoundRect(cardRect, 6, 6, _cardBorder);
+                canvas.DrawText("目标媒体平台", 216, TITLE_BAR_HEIGHT + 110, _uiTextPaint);
+                canvas.DrawText("多平台共存时，优先截获并接管的平台", 216, TITLE_BAR_HEIGHT + 130, _subTextPaint);
 
-                canvas.DrawText("目标媒体平台", 216, TITLE_BAR_HEIGHT + 110, uiTextPaint);
-                canvas.DrawText("多平台共存时，优先截获并接管的平台", 216, TITLE_BAR_HEIGHT + 130, subTextPaint);
-
-                // Dropdown 伪输入框
                 float dW = 110; float dX = WIDTH - 140; float dY = TITLE_BAR_HEIGHT + 96; float dH = 32;
                 var dRect = new SKRect(dX, dY, dX + dW, dY + dH);
-                using var dBg = new SKPaint { Color = _dropdownHovered ? new SKColor(255, 255, 255, 15) : new SKColor(255, 255, 255, 8), IsAntialias = true };
-                canvas.DrawRoundRect(dRect, 4, 4, dBg);
-                canvas.DrawText(_platforms[_selectedPlatformIndex].Name, dX + 10, dY + 21, uiTextPaint);
+                _dynamicFillPaint.Color = _dropdownHovered ? new SKColor(255, 255, 255, 15) : new SKColor(255, 255, 255, 8);
+                canvas.DrawRoundRect(dRect, 4, 4, _dynamicFillPaint);
+                canvas.DrawText(_platforms[_selectedPlatformIndex].Name, dX + 10, dY + 21, _uiTextPaint);
 
-                // 向下的 Chevron 箭头
-                using var chevronPaint = new SKPaint { Color = new SKColor(150, 150, 150), Style = SKPaintStyle.Stroke, StrokeWidth = 1.5f, IsAntialias = true };
-                canvas.DrawLine(dX + dW - 20, dY + 14, dX + dW - 15, dY + 19, chevronPaint);
-                canvas.DrawLine(dX + dW - 15, dY + 19, dX + dW - 10, dY + 14, chevronPaint);
+                canvas.DrawLine(dX + dW - 20, dY + 14, dX + dW - 15, dY + 19, _chevronPaint);
+                canvas.DrawLine(dX + dW - 15, dY + 19, dX + dW - 10, dY + 14, _chevronPaint);
             }
-            else if (_selectedTab == 3) // 交互设置
+            else if (_selectedTab == 3)
             {
                 DrawToggleCard(12, "自动隐藏", "当鼠标离开时自动隐藏刘海", NotchWindow.IsAutoHideEnabled, _autoHideToggleHovered);
             }
-            else if (_selectedTab == 4) // 关于页面
+            else if (_selectedTab == 4)
             {
                 float centerX = 200 + (WIDTH - 200) / 2f;
-                float startY = TITLE_BAR_HEIGHT + 30f; // 稍微上移一点，给高清大图标腾出空间
+                float startY = TITLE_BAR_HEIGHT + 30f;
 
-                // 图标绘制 (恢复 64x64 大尺寸！现在原汁原味绝对高清)
                 if (_appIconBitmap != null)
                 {
-                    // 关于页图标：64x64 逻辑像素，从 256 缩放到 64 使用 High 质量
                     var iconRect = new SKRect(centerX - 32, startY, centerX + 32, startY + 64);
-                    using var hqPaint = new SKPaint { FilterQuality = SKFilterQuality.High, IsAntialias = true };
-                    canvas.DrawBitmap(_appIconBitmap, iconRect, hqPaint);
+                    canvas.DrawBitmap(_appIconBitmap, iconRect, _hqSamplingOpts);
                     startY += 90f;
                 }
 
-                // 大标题 (NotchPeninsula)
-                using var titlePaint = new SKPaint { Color = SKColors.White, TextSize = 20f, IsAntialias = true, Typeface = uiTextPaint.Typeface, TextAlign = SKTextAlign.Center };
-                canvas.DrawText("NotchPeninsula", centerX, startY, titlePaint);
-                startY += 22f; // 标题到版本号的间距
+                _dynamicTextPaint.Color = SKColors.White;
+                _dynamicTextPaint.TextSize = 20f;
+                _dynamicTextPaint.TextAlign = SKTextAlign.Center;
+                canvas.DrawText("NotchPeninsula", centerX, startY, _dynamicTextPaint);
+                startY += 22f;
 
-                // 小文本 (NPS v1.0.0)
-                using var versionPaint = new SKPaint { Color = new SKColor(170, 170, 170), TextSize = 13f, IsAntialias = true, Typeface = uiTextPaint.Typeface, TextAlign = SKTextAlign.Center };
+                _dynamicTextPaint.Color = new SKColor(170, 170, 170);
+                _dynamicTextPaint.TextSize = 13f;
                 string displayVersion = _appTitleWithVersion.Replace("NotchPeninsula ", "NPS v");
-                canvas.DrawText(displayVersion, centerX, startY, versionPaint);
-                startY += 35f; // 版本号到下方超链接的间距
+                canvas.DrawText(displayVersion, centerX, startY, _dynamicTextPaint);
+                startY += 35f;
 
-                // 超链接
                 string[] links = ["检测更新", "项目仓库", "开发者"];
-                using var linkPaint = new SKPaint { TextSize = 13f, IsAntialias = true, Typeface = uiTextPaint.Typeface, TextAlign = SKTextAlign.Left };
+                _dynamicTextPaint.TextAlign = SKTextAlign.Left;
 
                 float spacing = 15f;
-                float totalWidth = linkPaint.MeasureText(links[0]) + linkPaint.MeasureText(links[1]) + linkPaint.MeasureText(links[2]) + (spacing * 2);
+                float totalWidth = _dynamicTextPaint.MeasureText(links[0]) + _dynamicTextPaint.MeasureText(links[1]) + _dynamicTextPaint.MeasureText(links[2]) + (spacing * 2);
                 float currentX = centerX - (totalWidth / 2f);
 
                 for (int i = 0; i < links.Length; i++)
                 {
-                    float textWidth = linkPaint.MeasureText(links[i]);
-                    linkPaint.Color = _hoveredLinkIndex == i ? new SKColor(0, 140, 240) : new SKColor(0, 120, 212);
-                    canvas.DrawText(links[i], currentX, startY, linkPaint);
+                    float textWidth = _dynamicTextPaint.MeasureText(links[i]);
+                    _dynamicTextPaint.Color = _hoveredLinkIndex == i ? new SKColor(0, 140, 240) : new SKColor(0, 120, 212);
+                    canvas.DrawText(links[i], currentX, startY, _dynamicTextPaint);
                     currentX += textWidth + spacing;
                 }
             }
+            else if (_selectedTab == 5)
+            {
+                void DrawMultiCard(float yOffset, string title, string[] subLabels, int[] indices, string unit)
+                {
+                    // 检测该卡片对应的尺寸设置是否已被改动
+                    bool isModified = false;
+                    foreach (int index in indices)
+                    {
+                        if (Math.Abs(_customValues[index] - _defaultCustomValues[index]) > 0.001f)
+                        {
+                            isModified = true;
+                            break;
+                        }
+                    }
 
-            canvas.Restore(); // 结束大边界裁切
+                    float cardHeight = 36 + subLabels.Length * 34;
+                    var cardRect = new SKRect(200, TITLE_BAR_HEIGHT + yOffset, WIDTH - 20, TITLE_BAR_HEIGHT + yOffset + cardHeight);
+                    canvas.DrawRoundRect(cardRect, 6, 6, _cardBg);
+                    canvas.DrawRoundRect(cardRect, 6, 6, _cardBorder);
 
-            // 浮动在顶层的下拉菜单
-            // 媒体设置下拉菜单
+                    canvas.DrawText(title, 216, TITLE_BAR_HEIGHT + yOffset + 26, _uiTextPaint);
+
+                    // 如果改动了某个尺寸设置，在标题旁边显示已生效标签
+                    if (isModified)
+                    {
+                        float titleWidth = _uiTextPaint.MeasureText(title);
+                        float tagX = 216 + titleWidth + 10;
+                        float tagY = TITLE_BAR_HEIGHT + yOffset + 13;
+                        var tagRect = new SKRect(tagX, tagY, tagX + 38, tagY + 18);
+
+                        _dynamicFillPaint.Color = new SKColor(0, 120, 212, 35); // 浅背景颜色
+                        canvas.DrawRoundRect(tagRect, 3f, 3f, _dynamicFillPaint); // 小圆角
+
+                        _dynamicTextPaint.TextSize = 10f; // 小文本样式
+                        _dynamicTextPaint.Color = new SKColor(0, 140, 240);
+                        canvas.DrawText("已生效", tagX + 4, tagY + 13, _dynamicTextPaint);
+                        _dynamicTextPaint.TextSize = 13f; // 还原字号，防止污染后续文字渲染
+                    }
+
+                    for (int i = 0; i < subLabels.Length; i++)
+                    {
+                        int index = indices[i];
+                        float cardBtnY = GetBtnY(index);
+
+                        canvas.DrawText(subLabels[i], 216, cardBtnY + 17, _subTextPaint);
+                        float cardRightX = WIDTH - 36;
+
+                        _dynamicFillPaint.Color = _hoveredMinusIndex == index ? new SKColor(255, 255, 255, 30) : new SKColor(255, 255, 255, 15);
+                        canvas.DrawRoundRect(new SKRect(cardRightX - 175, cardBtnY, cardRightX - 145, cardBtnY + 24), 4, 4, _dynamicFillPaint);
+                        canvas.DrawText("-", cardRightX - 164, cardBtnY + 17, _uiTextPaint);
+
+                        // 使用静态缓存字符串，零 GC 开销
+                        string valStr = _valStrCache[index];
+                        float textW = _uiTextPaint.MeasureText(valStr);
+                        canvas.DrawText(valStr, cardRightX - 90 - textW, cardBtnY + 17, _uiTextPaint);
+
+                        _dynamicFillPaint.Color = _hoveredPlusIndex == index ? new SKColor(255, 255, 255, 30) : new SKColor(255, 255, 255, 15);
+                        canvas.DrawRoundRect(new SKRect(cardRightX - 80, cardBtnY, cardRightX - 50, cardBtnY + 24), 4, 4, _dynamicFillPaint);
+                        canvas.DrawText("+", cardRightX - 69, cardBtnY + 17, _uiTextPaint);
+
+                        _dynamicFillPaint.Color = _hoveredResetIndex == index ? new SKColor(255, 255, 255, 30) : new SKColor(255, 255, 255, 15);
+                        canvas.DrawRoundRect(new SKRect(cardRightX - 40, cardBtnY, cardRightX, cardBtnY + 24), 4, 4, _dynamicFillPaint);
+                        canvas.DrawText("重置", cardRightX - 33, cardBtnY + 17, _subTextPaint);
+                    }
+                }
+
+                // 绘制新增的主题卡片
+                float themeY = TITLE_BAR_HEIGHT + 12;
+                var themeRect = new SKRect(200, themeY, WIDTH - 20, themeY + 70);
+                canvas.DrawRoundRect(themeRect, 6, 6, _cardBg);
+                canvas.DrawRoundRect(themeRect, 6, 6, _cardBorder);
+
+                canvas.DrawText("刘海主题", 216, themeY + 26, _uiTextPaint);
+                canvas.DrawText("刘海背景与文本颜色自适应反转", 216, themeY + 46, _subTextPaint);
+
+                float themeRightX = WIDTH - 36; // 变量隔离
+                float btnY = GetBtnY(-1);
+
+                void DrawThemeBtn(int index, string label, float leftOffset, float rightOffset)
+                {
+                    bool isActive = Renderer.ThemeMode == index;
+                    bool isHovered = _hoveredThemeIndex == index;
+                    float btnWidth = leftOffset - rightOffset;
+
+                    _dynamicFillPaint.Color = (isActive || isHovered) ? new SKColor(255, 255, 255, 30) : new SKColor(255, 255, 255, 15);
+                    canvas.DrawRoundRect(new SKRect(themeRightX - leftOffset, btnY, themeRightX - rightOffset, btnY + 24), 4, 4, _dynamicFillPaint);
+
+                    _dynamicTextPaint.Color = isActive ? new SKColor(0, 140, 240) : SKColors.White;
+
+                    // 根据文本真实长度在胶囊内部完美居中
+                    float textWidth = _dynamicTextPaint.MeasureText(label);
+                    float textX = themeRightX - leftOffset + (btnWidth - textWidth) / 2f;
+                    canvas.DrawText(label, textX, btnY + 17, _dynamicTextPaint);
+                }
+
+                DrawThemeBtn(0, "黑", 140, 100);
+                DrawThemeBtn(1, "白", 90, 50);
+                DrawThemeBtn(2, "系统", 40, 0);
+                DrawMultiCard(92, "待机显示", ["水平宽度", "垂直高度"], [0, 1], "px");
+                DrawMultiCard(210, "媒体控制", ["激活时宽度", "激活时高度"], [2, 3], "px");
+                DrawMultiCard(328, "消息通知", ["弹出的宽度", "弹出的高度"], [4, 5], "px");
+                DrawMultiCard(446, "全局 DPI 缩放", ["视觉比例"], [6], "x");
+            }
+
+            canvas.Restore();
+
             if (_selectedTab == 2 && _dropdownOpen)
             {
                 float mX = WIDTH - 140; float mY = TITLE_BAR_HEIGHT + 130; float mW = 110; float mH = _platforms.Length * 26;
                 var mRect = new SKRect(mX, mY, mX + mW, mY + mH);
 
-                // 绘制不透明底色和阴影感边框，防止背后的UI透过来
-                using var menuBg = new SKPaint { Color = new SKColor(40, 40, 40), IsAntialias = true };
-                canvas.DrawRoundRect(mRect, 4, 4, menuBg);
-                using var menuBorder = new SKPaint { Color = new SKColor(80, 80, 80), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-                canvas.DrawRoundRect(mRect, 4, 4, menuBorder);
+                canvas.DrawRoundRect(mRect, 4, 4, _menuBg);
+                canvas.DrawRoundRect(mRect, 4, 4, _menuBorder);
 
                 for (int i = 0; i < _platforms.Length; i++)
                 {
-                    // 每个 item 的 Y 轴步长改为 26
                     float itemY = mY + i * 26;
                     if (_hoveredDropdownIndex == i)
                     {
-                        using var itemHover = new SKPaint { Color = new SKColor(255, 255, 255, 15), IsAntialias = true };
-                        // 底部边界减去 2px 的 padding，也就是 26-2 = 24
-                        canvas.DrawRoundRect(new SKRect(mX + 2, itemY + 2, mX + mW - 2, itemY + 24), 3, 3, itemHover);
+                        canvas.DrawRoundRect(new SKRect(mX + 2, itemY + 2, mX + mW - 2, itemY + 24), 3, 3, _tabBgSelected);
                     }
-                    using var itemTextPaint = new SKPaint { Color = i == _selectedPlatformIndex ? new SKColor(0, 120, 212) : SKColors.White, TextSize = 13f, IsAntialias = true, Typeface = uiTextPaint.Typeface };
-                    // 文字的 Y 轴光学居中点调到 18
-                    canvas.DrawText(_platforms[i].Name, mX + 12, itemY + 18, itemTextPaint);
+                    _dynamicTextPaint.Color = i == _selectedPlatformIndex ? new SKColor(0, 120, 212) : SKColors.White;
+                    canvas.DrawText(_platforms[i].Name, mX + 12, itemY + 18, _dynamicTextPaint);
                 }
             }
 
-            // 显示设置下拉菜单
             if (_selectedTab == 1 && _displayDropdownOpen)
             {
-                float mX = WIDTH - 140; float mY = TITLE_BAR_HEIGHT + 60; float mW = 110; float mH = _displayOptions.Length * 26;
+                // 将 mY 的坐标由 + 60 调整到下移后的避让位置：+ 220
+                float mX = WIDTH - 140; float mY = TITLE_BAR_HEIGHT + 220; float mW = 110; float mH = _displayOptions.Length * 26;
                 var mRect = new SKRect(mX, mY, mX + mW, mY + mH);
 
-                using var menuBg = new SKPaint { Color = new SKColor(40, 40, 40), IsAntialias = true };
-                canvas.DrawRoundRect(mRect, 4, 4, menuBg);
-                using var menuBorder = new SKPaint { Color = new SKColor(80, 80, 80), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-                canvas.DrawRoundRect(mRect, 4, 4, menuBorder);
+                canvas.DrawRoundRect(mRect, 4, 4, _menuBg);
+                canvas.DrawRoundRect(mRect, 4, 4, _menuBorder);
 
                 for (int i = 0; i < _displayOptions.Length; i++)
                 {
                     float itemY = mY + i * 26;
                     if (_hoveredDisplayDropdownIndex == i)
                     {
-                        using var itemHover = new SKPaint { Color = new SKColor(255, 255, 255, 15), IsAntialias = true };
-                        canvas.DrawRoundRect(new SKRect(mX + 2, itemY + 2, mX + mW - 2, itemY + 24), 3, 3, itemHover);
+                        canvas.DrawRoundRect(new SKRect(mX + 2, itemY + 2, mX + mW - 2, itemY + 24), 3, 3, _tabBgSelected);
                     }
-                    using var itemTextPaint = new SKPaint { Color = i == _selectedDisplayIndex ? new SKColor(0, 120, 212) : SKColors.White, TextSize = 13f, IsAntialias = true, Typeface = uiTextPaint.Typeface };
-                    canvas.DrawText(_displayOptions[i], mX + 12, itemY + 18, itemTextPaint);
+                    _dynamicTextPaint.Color = i == _selectedDisplayIndex ? new SKColor(0, 120, 212) : SKColors.White;
+                    canvas.DrawText(_displayOptions[i], mX + 12, itemY + 18, _dynamicTextPaint);
                 }
             }
 
-            // 最后盖上一层极细的全局边框
-            using var globalBorderPaint = new SKPaint { Color = new SKColor(60, 60, 60), Style = SKPaintStyle.Stroke, StrokeWidth = 1, IsAntialias = true };
-            canvas.DrawRoundRect(new SKRect(0.5f, 0.5f, WIDTH - 0.5f, HEIGHT - 0.5f), cornerRadius, cornerRadius, globalBorderPaint);
-
+            canvas.DrawRoundRect(new SKRect(0.5f, 0.5f, WIDTH - 0.5f, HEIGHT - 0.5f), cornerRadius, cornerRadius, _globalBorderPaint);
             UpdateWindow(surface.PeekPixels());
         }
 
