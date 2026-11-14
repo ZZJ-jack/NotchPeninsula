@@ -32,6 +32,8 @@ public enum PluginFailureKind
     HostMismatch,
     /// <summary>构造实例或 Initialize 抛了异常。</summary>
     InitFailed,
+    /// <summary>导入的文件既不是 .dll 也不是 .zip：插件入口只认这两种格式。</summary>
+    UnsupportedFile,
     Other,
 }
 
@@ -74,6 +76,23 @@ public sealed class PluginEntry
 public sealed class PluginManager
 {
     public const string MarketplaceUrl = "https://nps.georgewu.top/market";
+
+    /// <summary>
+    /// 插件导入只认 .dll / .zip：单文件插件直接给 dll，带附属文件的插件打包成 zip。
+    /// 拖入、文件选择框、市场安装三条入口都走这里，别再各写一份扩展名判断。
+    /// </summary>
+    public static bool IsSupportedImportFile(string? path)
+        => path != null
+           && (path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+               || path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsPluginDll(string? path)
+        => path != null && path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsPluginPackage(string? path)
+        => path != null && path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+
+    public const string SupportedImportHint = "仅支持导入 .dll 或 .zip 插件";
 
     private const string RegistryBase = @"SOFTWARE\NotchPeninsula";
     private const string DisabledListValue = "Plugins_Disabled";
@@ -1133,6 +1152,9 @@ public sealed class PluginManager
     {
         try
         {
+            if (!IsPluginDll(dllPath))
+                return (false, SupportedImportHint, PluginFailureKind.UnsupportedFile);
+
             if (!File.Exists(dllPath)) return (false, "文件不存在", PluginFailureKind.Other);
 
             Directory.CreateDirectory(PluginsRoot);

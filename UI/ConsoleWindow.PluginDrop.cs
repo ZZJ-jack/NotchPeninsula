@@ -79,8 +79,8 @@ namespace NotchPeninsula
             {
                 if (string.IsNullOrWhiteSpace(f)) continue;
 
-                if (f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) _pluginDropDlls.Add(f);
-                else if (f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) _pluginDropZips.Add(f);
+                if (PluginManager.IsPluginDll(f)) _pluginDropDlls.Add(f);
+                else if (PluginManager.IsPluginPackage(f)) _pluginDropZips.Add(f);
             }
             if (_pluginDropDlls.Count == 0 && _pluginDropZips.Count == 0) return false;
 
@@ -244,6 +244,9 @@ namespace NotchPeninsula
 
             try
             {
+                if (!PluginManager.IsPluginPackage(zipPath))
+                    return (false, PluginManager.SupportedImportHint, PluginFailureKind.UnsupportedFile);
+
                 extractDir = Path.Combine(Path.GetTempPath(), "NotchPeninsula", "drop",
                     "x_" + Guid.NewGuid().ToString("N")[..8]);
                 if (Directory.Exists(extractDir)) Directory.Delete(extractDir, true);

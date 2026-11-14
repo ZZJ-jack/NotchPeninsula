@@ -21,6 +21,7 @@ namespace NotchPeninsula
             public string Author = "";
             public string Desc = "";
             public string Version = "";
+            public string MinNpsVersion = ""; // 插件要求的最低宿主版本（空 = 不限制）
             public string Updated = "";
             public string Category = "";    // market API 的 category（theme/media/utility/dev）
             public int Downloads;
@@ -185,7 +186,7 @@ namespace NotchPeninsula
         private int _marketScroll;                       // 市场列表滚动首行（绝对条目下标）
 
         //   只有一颗「好的」，两个页签都要能画出来。
-        private enum MarketDialog { None, Detail, Rate, LoadFailed, UninstallConfirm, UninstallData }
+        private enum MarketDialog { None, Detail, Rate, LoadFailed, MinVersion, UninstallConfirm, UninstallData }
 
         private MarketDialog _marketDialog = MarketDialog.None;
         private int _marketDialogIndex = -1;             // 弹窗对应的市场条目下标
@@ -207,6 +208,11 @@ namespace NotchPeninsula
         private string _rateStatus = "";                 // 弹窗内状态文案（成功绿 / 失败红）
         private bool _rateStatusIsError;
 
+        // 最低 NPS 版本提醒：点「安装」前弹一次，继续则直接进入下载流程。
+        private MarketPlugin? _minVersionPlugin;
+        private string _minVersionRequired = "";
+        private string _minVersionCurrent = "";
+
         private int _hoveredMarketInstall = -1;
         private int _hoveredMarketUninstall = -1;
         private int _hoveredMarketDetail = -1;
@@ -218,6 +224,9 @@ namespace NotchPeninsula
             _marketDialogIndex = -1;
             _uninstallEntry = null;
             _uninstallDir = "";
+            _minVersionPlugin = null;
+            _minVersionRequired = "";
+            _minVersionCurrent = "";
             _hoveredDialogClose = false;
             _hoveredDialogButton = -1;
             _rateStatus = "";
@@ -226,7 +235,12 @@ namespace NotchPeninsula
 
         /// <summary>当前是否有「必须先处理」的弹窗：命中判定与点击分派都走它，别再去碰下面的列表。</summary>
         private bool IsConfirmDialogOpen =>
-            _marketDialog is MarketDialog.LoadFailed or MarketDialog.UninstallConfirm or MarketDialog.UninstallData;
+            _marketDialog is MarketDialog.LoadFailed or MarketDialog.MinVersion
+                or MarketDialog.UninstallConfirm or MarketDialog.UninstallData;
+
+        /// <summary>两种「提示型」弹窗共用富文本正文与群号链接（加载失败 / 最低版本）。</summary>
+        private bool IsNoticeDialog =>
+            _marketDialog is MarketDialog.LoadFailed or MarketDialog.MinVersion;
 
         /// <summary>
         /// 打开「插件加载失败」弹窗。<paramref name="subject"/> = 是哪个插件（可为空：启动期批量失败时
@@ -258,6 +272,51 @@ namespace NotchPeninsula
             if (render) Render();
         }
 
+        // ---- 最低 NPS 版本提醒 ----
+
+        /// <summary>把服务端版本号变成可比较的 Version；空值 / 坏值都按「无限制」处理。</summary>
+        private static bool TryParseNpsVersion(string? raw, out Version version)
+        {
+            version = new Version(0, 0);
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+
+            string s = raw.Trim().TrimStart('v', 'V');
+            int cut = s.IndexOfAny(new[] { '-', '+', ' ' });   // 去掉 -beta / +build 之类的后缀
+            if (cut >= 0) s = s[..cut];
+            if (s.Length == 0 || !Version.TryParse(s, out var parsed)) return false;
+
+            version = parsed!;
+            return true;
+        }
+
+        private static string FormatNpsVersion(Version v)
+            => v.Build >= 0 ? v.ToString(3) : v.ToString(2);
+
+        private static Version CurrentNpsVersion =>
+            typeof(ConsoleWindow).Assembly.GetName().Version ?? new Version(0, 0);
+
+        /// <summary>当前宿主版本是否低于插件声明的最低版本。</summary>
+        private static bool IsNpsTooOld(MarketPlugin mp, out Version required)
+        {
+            required = new Version(0, 0);
+            return TryParseNpsVersion(mp.MinNpsVersion, out required)
+                   && CurrentNpsVersion.CompareTo(required) < 0;
+        }
+
+        private void OpenMinVersionWarning(MarketPlugin mp, Version required)
+        {
+            _marketDialog = MarketDialog.MinVersion;
+            _marketDialogIndex = -1;
+            _minVersionPlugin = mp;
+            _minVersionRequired = FormatNpsVersion(required);
+            _minVersionCurrent = FormatNpsVersion(CurrentNpsVersion);
+            _hoveredDialogClose = false;
+            _hoveredDialogButton = -1;
+            _loadFailedLinkHovered = false;
+            BuildMinVersionLayout();
+            Render();
+        }
+
         /// <summary>把失败类型翻成一句用户能行动的话。全都弹「不兼容」等于什么都没说。</summary>
         private static string ReasonTextOf(PluginFailureKind kind) => kind switch
         {
@@ -272,6 +331,8 @@ namespace NotchPeninsula
                 "插件引用了当前 NPS 里不存在的接口，多半是按旧版 API 编译的。",
             PluginFailureKind.InitFailed =>
                 "插件初始化时抛出了异常，通常是它与当前 NPS 版本不兼容。",
+            PluginFailureKind.UnsupportedFile =>
+                "插件只支持 .dll 或 .zip：单个插件用 dll，带附属文件的插件请打包成 zip 再导入。",
             _ => "可能是插件与 NPS 的兼容性问题。",
         };
 
@@ -448,6 +509,9 @@ namespace NotchPeninsula
                     Author = p.TryGetProperty("author", out var author) ? StripInvisible(author.GetString() ?? "") : "",
                     Desc = p.TryGetProperty("desc", out var desc) ? StripInvisible(desc.GetString() ?? "") : "",
                     Version = p.TryGetProperty("version", out var ver) ? ver.GetString() ?? "" : "",
+                    MinNpsVersion = p.TryGetProperty("minNpsVersion", out var minVer)
+                                    && minVer.ValueKind == JsonValueKind.String
+                        ? minVer.GetString() ?? "" : "",
                     Updated = p.TryGetProperty("updated", out var upd) ? upd.GetString() ?? "" : "",
                     Official = p.TryGetProperty("official", out var off) && off.ValueKind == JsonValueKind.True,
                     Category = p.TryGetProperty("category", out var cat) ? cat.GetString() ?? "" : "",
@@ -473,9 +537,10 @@ namespace NotchPeninsula
                         string fn = f.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                         string url = f.TryGetProperty("url", out var u) ? u.GetString() ?? "" : "";
                         if (fn.Length == 0 || url.Length == 0) continue;
+                        if (!PluginManager.IsSupportedImportFile(fn)) continue;
                         mp.FileName = fn;
                         mp.FileUrl = url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? url : MarketApiBase + url;
-                        mp.IsZip = fn.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+                        mp.IsZip = PluginManager.IsPluginPackage(fn);
                         break;
                     }
                 }
@@ -787,6 +852,33 @@ namespace NotchPeninsula
         /// <summary>按当前字体把失败文案排成行。群号单独成段，且保证不跨行（跨行后命中区就散了）。</summary>
         private void BuildLoadFailedLayout()
         {
+            // 先排「为什么失败」那句，再接固定的群 / 版本提示
+            var runs = new List<(string Text, bool IsLink)>(LoadFailedRuns.Length + 2);
+            if (_loadFailedReason.Length > 0) runs.Add((_loadFailedReason, false));
+            runs.AddRange(LoadFailedRuns);
+            if (_loadFailedWithVersionHint) runs.Add((LoadFailedVersionHint, false));
+            BuildNoticeLayout(runs);
+        }
+
+        /// <summary>
+        /// 最低版本提醒复用同一套富文本版面：群号要能单独命中，绘制与点击必须读同一份折行结果。
+        /// </summary>
+        private void BuildMinVersionLayout()
+        {
+            string name = _minVersionPlugin?.Name ?? "该插件";
+            var runs = new List<(string Text, bool IsLink)>
+            {
+                ($"「{name}」要求 NPS v{_minVersionRequired} 或更高版本（当前 v{_minVersionCurrent}）。", false),
+                ("可能会出现加载失败、部分操作无效的问题，请下载最新 NPS 或前往 QQ 群 ", false),
+                (LoadFailedLinkText, true),
+                ("，获取最新版。", false),
+            };
+            BuildNoticeLayout(runs);
+        }
+
+        /// <summary>把若干段（文字 / 链接）排成弹窗正文；链接整段不跨行。</summary>
+        private void BuildNoticeLayout(IReadOnlyList<(string Text, bool IsLink)> runs)
+        {
             _loadFailedLines.Clear();
             _loadFailedLinkLine = -1;
             _loadFailedLinkOffsetX = 0f;
@@ -814,12 +906,6 @@ namespace NotchPeninsula
                 line = new List<(string, bool)>();
                 x = 0f;
             }
-
-            // 先排「为什么失败」那句，再接固定的群 / 版本提示
-            var runs = new List<(string Text, bool IsLink)>(LoadFailedRuns.Length + 2);
-            if (_loadFailedReason.Length > 0) runs.Add((_loadFailedReason, false));
-            runs.AddRange(LoadFailedRuns);
-            if (_loadFailedWithVersionHint) runs.Add((LoadFailedVersionHint, false));
 
             foreach (var (text, isLink) in runs)
             {
@@ -865,7 +951,11 @@ namespace NotchPeninsula
         // 版面就在这里补出来 —— 空版面会让正文整块消失、链接也永远点不中。
         private SKRect GetNoticeDialogRect()
         {
-            if (_loadFailedLines.Count == 0) BuildLoadFailedLayout();
+            if (_loadFailedLines.Count == 0)
+            {
+                if (_marketDialog == MarketDialog.MinVersion) BuildMinVersionLayout();
+                else BuildLoadFailedLayout();
+            }
             return GetMarketDialogRect(Math.Max(2, _loadFailedLines.Count), true);
         }
 
@@ -914,6 +1004,7 @@ namespace NotchPeninsula
 
         private static int DialogButtonCount(MarketDialog kind) => kind switch
         {
+            MarketDialog.MinVersion => 2,      // 取消 / 继续
             MarketDialog.UninstallData => 3,   // 打开目录 / 保留 / 删除
             _ => 1,
         };
@@ -935,6 +1026,7 @@ namespace NotchPeninsula
         private SKRect GetCurrentDialogRect()
         {
             if (_marketDialog == MarketDialog.LoadFailed) return GetNoticeDialogRect();
+            if (_marketDialog == MarketDialog.MinVersion) return GetNoticeDialogRect();
             if (_marketDialog == MarketDialog.UninstallConfirm) return GetUninstallConfirmDialogRect();
             if (_marketDialog == MarketDialog.UninstallData) return GetUninstallDirDialogRect();
 
@@ -1117,6 +1209,9 @@ namespace NotchPeninsula
             var local = MatchLocalPlugin(mp);
             if (local == null || PluginManager.Instance.IsDisabled(local)) return false;
             if (local.Version.Length == 0) return false;
+            // 新版要求更高的 NPS：一键更新（及角标 / 更新条计数）直接忽略；
+            // 行内单独的「更新」仍可点，走最低版本确认框。
+            if (IsNpsTooOld(mp, out _)) return false;
             return CompareVersions(mp.Version, local.Version) > 0;
         }
 
@@ -1396,9 +1491,17 @@ namespace NotchPeninsula
 
         // ---- 安装 / 卸载 ----
 
-        private void StartMarketInstall(MarketPlugin mp)
+        private void StartMarketInstall(MarketPlugin mp, bool ignoreMinVersion = false)
         {
             if (_marketBusyId.Length > 0) return;   // 同一时刻只允许一个下载任务
+
+            // 市场清单同样只认 dll / zip；坏条目在下载前就挡掉，别把 exe 之类的文件拖进 plugins。
+            if (!PluginManager.IsSupportedImportFile(mp.FileName))
+            {
+                SetMarketHint($"{mp.Name}：{PluginManager.SupportedImportHint}", true);
+                Render();
+                return;
+            }
 
             // 本机已装但没在跑（禁用 / 上次加载失败）：主按钮写的是「启用」，点它就该把插件跑起来。
             // 再下一遍同样的包只是把网络、覆盖安装、重载全白做一遍，用户还得等进度。
@@ -1411,6 +1514,13 @@ namespace NotchPeninsula
                 if (_marketOnlyInstalled) RefreshMarketFilter();
                 if (!started) ReportPluginLoadFailure(local.Failure, local.FriendlyName, "启用失败");   // 启用 = 再加载一次，失败照样要说
                 else Render();
+                return;
+            }
+
+            // 最低版本不满足：先让用户确认，继续才下载。只拦真正的安装 / 更新，不拦上面的「启用」。
+            if (!ignoreMinVersion && IsNpsTooOld(mp, out var required))
+            {
+                OpenMinVersionWarning(mp, required);
                 return;
             }
 
@@ -1601,7 +1711,7 @@ namespace NotchPeninsula
             if (_hoveredDialogClose) { CloseMarketDialog(true); return; }
 
             _hoveredDialogButton = HitDialogButton(dlgRect, px, py);
-            if (_marketDialog == MarketDialog.LoadFailed)
+            if (IsNoticeDialog)
             {
                 _loadFailedLinkHovered = HitLoadFailedLink(dlgRect, px, py);
                 Logger.Debug($"[弹窗] 链接判定 line={_loadFailedLinkLine} dx={_loadFailedLinkOffsetX:F0} "
@@ -1613,6 +1723,18 @@ namespace NotchPeninsula
                 case MarketDialog.LoadFailed:
                     if (_loadFailedLinkHovered) { OpenLoadFailedQqLink(); break; }   // 点链接不关弹窗
                     if (_hoveredDialogButton == 0) CloseMarketDialog(true);
+                    break;
+
+                case MarketDialog.MinVersion:
+                    if (_loadFailedLinkHovered) { OpenLoadFailedQqLink(); break; }   // 群号链接不关弹窗
+                    if (_hoveredDialogButton == 0) { CloseMarketDialog(true); break; }   // 取消
+                    if (_hoveredDialogButton == 1)
+                    {
+                        var pending = _minVersionPlugin;
+                        CloseMarketDialog(render: false);
+                        if (pending != null) StartMarketInstall(pending, ignoreMinVersion: true);
+                        else Render();
+                    }
                     break;
 
                 case MarketDialog.UninstallConfirm:

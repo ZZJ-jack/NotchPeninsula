@@ -2257,6 +2257,10 @@ namespace NotchPeninsula
             {
                 DrawLoadFailedDialog(canvas);
             }
+            else if (_marketDialog == MarketDialog.MinVersion)
+            {
+                DrawMinVersionDialog(canvas);
+            }
             else if (_marketDialogIndex >= 0)
             {
                 var mp = GetMarketAt(_marketDialogIndex);
@@ -2473,32 +2477,30 @@ namespace NotchPeninsula
         /// 弹窗按钮只有两种：主操作（彩色实底白字，accent 有值）与次操作（灰底浅字，accent 为 null）。
         /// 弹窗样式统一的要求全落在这里 —— 别在各自的 Draw 里再手搓颜色。
         /// </summary>
-        private void DrawDialogButton(SKCanvas canvas, SKRect r, string label, int index, (SKColor Normal, SKColor Hover)? accent)
+        private void DrawDialogButton(SKCanvas canvas, SKRect r, string label, int index,
+                                      (SKColor Normal, SKColor Hover)? accent, bool darkText = false)
         {
             bool hovered = _hoveredDialogButton == index;
             _dynamicFillPaint.Color = accent is { } a
                 ? (hovered ? a.Hover : a.Normal)
                 : (hovered ? Overlay(30) : Overlay(15));
             canvas.DrawRoundRect(r, 4, 4, _dynamicFillPaint);
-            _uiTextPaint.Color = accent == null ? Neutral(200) : SKColors.White;
+            _uiTextPaint.Color = darkText ? new SKColor(42, 34, 8)
+                : accent == null ? Neutral(200) : SKColors.White;
             DrawCenteredButtonLabel(canvas, label, r, _uiTextPaint);
         }
 
         private static readonly (SKColor Normal, SKColor Hover) DialogAccentBlue = (new SKColor(0, 120, 212), new SKColor(0, 140, 240));
         private static readonly (SKColor Normal, SKColor Hover) DialogAccentRed = (new SKColor(180, 50, 50), new SKColor(200, 60, 60));
         private static readonly (SKColor Normal, SKColor Hover) DialogAccentGreen = (new SKColor(44, 160, 92), new SKColor(58, 184, 108));
+        private static readonly (SKColor Normal, SKColor Hover) DialogAccentYellow = (new SKColor(235, 190, 50), new SKColor(250, 208, 70));
 
-        private void DrawLoadFailedDialog(SKCanvas canvas)
+        /// <summary>提示弹窗的富文本正文：逐行逐段画，群号单独上色。</summary>
+        private void DrawNoticeBody(SKCanvas canvas, SKRect rect, float bodyY)
         {
-            var rect = GetNoticeDialogRect();
-            canvas.DrawRoundRect(rect, 8, 8, _menuBg);
-            canvas.DrawRoundRect(rect, 8, 8, _menuBorder);
-
-            float bodyY = DrawDialogHeader(canvas, rect, "插件加载失败") + LoadFailedBodyDY;
             float left = rect.Left + DialogPad;
 
-            // 逐行逐段画：群号那一段单独上色 —— 折行位置是打开弹窗时算好的，
-            // 这里只按结果摆，别再自己折一遍（否则链接的命中区会跟画面错开）。
+            // 折行位置是打开弹窗时算好的，这里只按结果摆，别再自己折一遍（否则链接的命中区会跟画面错开）。
             for (int i = 0; i < _loadFailedLines.Count; i++)
             {
                 float lineY = bodyY + i * DialogLineH;
@@ -2523,7 +2525,31 @@ namespace NotchPeninsula
             }
 
             _subTextPaint.Color = Neutral(170);
+        }
+
+        private void DrawLoadFailedDialog(SKCanvas canvas)
+        {
+            var rect = GetNoticeDialogRect();
+            canvas.DrawRoundRect(rect, 8, 8, _menuBg);
+            canvas.DrawRoundRect(rect, 8, 8, _menuBorder);
+
+            float bodyY = DrawDialogHeader(canvas, rect, "插件加载失败") + LoadFailedBodyDY;
+            DrawNoticeBody(canvas, rect, bodyY);
             DrawDialogButton(canvas, GetDialogButtonRect(rect, 0, 1), "好的", 0, DialogAccentBlue);
+        }
+
+        private void DrawMinVersionDialog(SKCanvas canvas)
+        {
+            var rect = GetNoticeDialogRect();
+            canvas.DrawRoundRect(rect, 8, 8, _menuBg);
+            canvas.DrawRoundRect(rect, 8, 8, _menuBorder);
+
+            float bodyY = DrawDialogHeader(canvas, rect, "NPS 版本过低") + LoadFailedBodyDY;
+            DrawNoticeBody(canvas, rect, bodyY);
+
+            // 用户指定：取消在左（绿）、继续在右（黄）。继续是主操作，放最右。
+            DrawDialogButton(canvas, GetDialogButtonRect(rect, 0, 2), "取消", 0, DialogAccentGreen);
+            DrawDialogButton(canvas, GetDialogButtonRect(rect, 1, 2), "继续", 1, DialogAccentYellow, darkText: true);
         }
 
         /// <summary>
