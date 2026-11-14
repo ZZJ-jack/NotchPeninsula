@@ -26,7 +26,7 @@ namespace NotchPeninsula
                 close.Inflate(4f, 4f);
                 closeHovered = close.Contains(x, y);
                 if (!closeHovered) button = HitDialogButton(rect, x, y);
-                if (!closeHovered && _marketDialog == MarketDialog.LoadFailed)
+                if (!closeHovered && IsNoticeDialog)
                     linkHovered = HitLoadFailedLink(rect, x, y);
             }
 
@@ -655,7 +655,7 @@ namespace NotchPeninsula
                         if (!newHoveredDialogClose) newHoveredDialogButton = HitDialogButton(rect, x, y);
 
                         // 失败弹窗正文里的群号：位置取自打开时排好的版面，与绘制同一份数据
-                        if (!newHoveredDialogClose && _marketDialog == MarketDialog.LoadFailed)
+                        if (!newHoveredDialogClose && IsNoticeDialog)
                             newLoadFailedLinkHovered = HitLoadFailedLink(rect, x, y);
                     }
                 }
@@ -728,7 +728,7 @@ namespace NotchPeninsula
                         if (!newHoveredDialogClose) newHoveredDialogButton = HitDialogButton(rect, x, y);
 
                         // 失败弹窗正文里的群号：位置取自打开时排好的版面，与绘制同一份数据
-                        if (!newHoveredDialogClose && _marketDialog == MarketDialog.LoadFailed)
+                        if (!newHoveredDialogClose && IsNoticeDialog)
                             newLoadFailedLinkHovered = HitLoadFailedLink(rect, x, y);
                     }
                 }

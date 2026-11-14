@@ -141,12 +141,24 @@ namespace NotchPeninsula
             try
             {
                 // 单个 DLL 与插件包（ZIP，带附属文件的那种）共用同一个入口：
-                // 过滤器把两者放最前，选完再按扩展名分派到对应安装路径。
+                // 文件选择框只列这两种，选完再按扩展名分派到对应安装路径。
+                // 过滤器不是安全边界：用户仍可手输文件名，所以选完还要再校验一次。
                 string? picked = ShowOpenFileDialog(_hwnd, "选择 NotchPeninsula 插件",
-                    "插件 (*.dll;*.zip)\0*.dll;*.zip\0插件动态库 (*.dll)\0*.dll\0插件包 (*.zip)\0*.zip\0所有文件 (*.*)\0*.*\0");
+                    "插件 (*.dll;*.zip)\0*.dll;*.zip\0插件动态库 (*.dll)\0*.dll\0插件包 (*.zip)\0*.zip\0");
                 if (picked == null) return;
 
-                bool isZip = picked.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+                if (!PluginManager.IsSupportedImportFile(picked))
+                {
+                    Logger.Warn($"[PluginCenter] 拒绝导入不支持的文件: {Path.GetFileName(picked)}");
+                    _pluginHint = "仅支持 DLL / ZIP";
+                    _pluginHintIsError = true;
+                    ReportPluginLoadFailure(PluginFailureKind.UnsupportedFile,
+                        Path.GetFileName(picked), render: false);
+                    Render();
+                    return;
+                }
+
+                bool isZip = PluginManager.IsPluginPackage(picked);
                 var (ok, msg, failure) = isZip
                     ? InstallPluginPackage(picked)
                     : PluginManager.Instance.Import(picked);
